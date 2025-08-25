@@ -5239,7 +5239,7 @@
       <field type="uint32_t" name="time_boot_ms" units="ms">Time since system boot started</field>
       <field type="uint32_t" name="shoot_time_ms" units="ms">Time from the start of the system boot to the capture of a frame</field>
       <field type="uint32_t" name="time" units="ms">Time from the start of the system boot to bbox approximation</field>
-      <field type="int8_t" name="target_id">Main target ID on frame</field>
+      <field type="int16_t" name="target_id">Main target ID on frame</field>
       <field type="uint8_t" name="track_id">Track ID of box</field>
       <field type="float" name="score">Target confedence</field>
       <field type="float" name="left">Left side of the bounding box</field>
@@ -5291,7 +5291,7 @@
     <message id="9" name="PLANE_TARGET_ID">
       <description>Target selection message</description>
       <field type="uint32_t" name="time_boot_ms" units="ms">Time since system boot started</field>
-      <field type="int8_t" name="target_id" units="ms">Selected target id</field>
+      <field type="int16_t" name="target_id" units="ms">Selected target id</field>
     </message>
     <message id="10" name="PLANE_NO_TARGET">
       <description>No target on frame message</description>
