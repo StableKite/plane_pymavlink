@@ -1,3 +1,6 @@
+# Установка пакета:
+`pip install git+https://github.com/StableKite/plane_pymavlink`
+
 [![Build Status](https://travis-ci.org/ArduPilot/pymavlink.svg?branch=master)](https://travis-ci.org/ArduPilot/pymavlink)
 # Pymavlink
 This is a Python implementation of the MAVLink protocol.
