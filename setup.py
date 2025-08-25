@@ -82,9 +82,6 @@ def generate_content():
 
         for xml in v10_dialects:
             dialect = os.path.basename(xml)[:-4]
-            wildcard = os.getenv("MAVLINK_DIALECT",'*')
-            if not fnmatch.fnmatch(dialect, wildcard):
-                continue
             print("Building %s for protocol 1.0" % xml)
             if not mavgen.mavgen_python_dialect(dialect, mavparse.PROTOCOL_1_0):
                 print("Building failed %s for protocol 1.0" % xml)
@@ -92,9 +89,6 @@ def generate_content():
 
         for xml in v20_dialects:
             dialect = os.path.basename(xml)[:-4]
-            wildcard = os.getenv("MAVLINK_DIALECT",'*')
-            if not fnmatch.fnmatch(dialect, wildcard):
-                continue
             print("Building %s for protocol 2.0" % xml)
             if not mavgen.mavgen_python_dialect(dialect, mavparse.PROTOCOL_2_0):
                 print("Building failed %s for protocol 2.0" % xml)
