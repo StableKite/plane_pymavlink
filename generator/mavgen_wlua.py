@@ -197,8 +197,10 @@ def generate_field_or_param(outf, field_or_param, name, label, physical_type, fi
             values = "enumEntryName." + field_or_param.enum
         else:
             values = values + ", base.HEX_DEC"
+            if field_type.startswith("ftypes.INT"):
+                field_type = field_type.replace("INT", "UINT")
         # force display type of enums to uint32 so we can show the names
-        if field_type in ("ftypes.FLOAT", "ftypes.DOUBLE", "ftypes.INT32"):
+        if field_type in ("ftypes.FLOAT", "ftypes.DOUBLE"):
             field_type = "ftypes.UINT32"
     else:
         display_type = physical_type
@@ -504,8 +506,8 @@ function mavlink_proto.dissector(buffer,pinfo,tree)
         local version = buffer(offset,1):uint()
         local protocolString = ""
     
-    	while (true)
-		do
+        while (true)
+        do
             protocolString = protocolVersions[version]
             if (protocolString ~= nil) then
                 break
@@ -534,7 +536,7 @@ function mavlink_proto.dissector(buffer,pinfo,tree)
                     end
                     return
                 end
-            end	
+            end
         end
         
         if (unknownFrameBeginOffset ~= 0) then
