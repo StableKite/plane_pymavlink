@@ -1,7 +1,11 @@
 #!/bin/sh
 
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
+: "${MDEF:=$REPO_ROOT/message_definitions}"
+
 for protocol in 1.0 2.0; do
- for xml in ../../message_definitions/v1.0/*.xml; do
+ for xml in "$MDEF"/v1.0/*.xml; do
      base=$(basename $xml .xml)
      mkdir -p javascript/implementations/mavlink_${base}_v${protocol}
 

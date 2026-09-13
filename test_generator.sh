@@ -3,7 +3,8 @@
 set -e
 set -x
 
-test -z "$MDEF" && MDEF="../message_definitions"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+: "${MDEF:=$SCRIPT_DIR/message_definitions}"
 
 # MAVLINK_DIALECT=ardupilotmega python setup.py clean build install --user
 

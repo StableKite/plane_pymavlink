@@ -36,7 +36,8 @@ OUT2="/dev/stdout"
 fi
 
 
-test -z "$MDEF" && MDEF="../message_definitions"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+: "${MDEF:=$SCRIPT_DIR/message_definitions}"
 
 
     # build js bindings we want to test
