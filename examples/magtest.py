@@ -7,7 +7,7 @@ rotate APMs on bench to test magnetometers
 import time
 from math import radians
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)

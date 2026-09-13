@@ -10,8 +10,8 @@ except ImportError:
     # importlib.resources.files() requires Python 3.9+; use backport for older versions
     from importlib_resources import files as importlib_files
 
-from pymavlink.generator.mavparse import MAVXML
-from pymavlink.generator.mavparse import MAVParseError
+from plane_pymavlink.generator.mavparse import MAVXML
+from plane_pymavlink.generator.mavparse import MAVParseError
 
 class MAVXMLTest(unittest.TestCase):
     """

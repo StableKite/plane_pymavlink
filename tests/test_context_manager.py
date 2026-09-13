@@ -7,8 +7,8 @@ test that log readers and mavlink connections work as context managers
 import os
 import unittest
 
-from pymavlink import DFReader
-from pymavlink import mavutil
+from plane_pymavlink import DFReader
+from plane_pymavlink import mavutil
 
 
 class ContextManagerTest(unittest.TestCase):

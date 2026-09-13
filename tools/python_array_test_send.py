@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import time
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 master = mavutil.mavlink_connection("udp::14555", input=False, dialect="array_test")
 while True:

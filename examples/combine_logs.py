@@ -19,8 +19,8 @@ parser.add_argument("--mapping", default="POS:POS2,ATT:ATT2,FOLL:FOL2", help="me
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
-from pymavlink import DFReader
+from plane_pymavlink import mavutil
+from plane_pymavlink import DFReader
 
 log1 = mavutil.mavlink_connection(args.log1)
 log2 = mavutil.mavlink_connection(args.log2)

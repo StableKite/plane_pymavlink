@@ -15,7 +15,7 @@ import sys
 import time
 
 try:
-    from pymavlink.mavextra import *
+    from plane_pymavlink.mavextra import *
 except:
     print("WARNING: Numpy missing, mathematical notation will not be supported..")
 
@@ -61,7 +61,7 @@ if not args.mav10:
 
 import inspect
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 
 if args.profile:

@@ -11,7 +11,7 @@ import time
 import copy
 from argparse import ArgumentParser
 import scipy.signal as signal
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 class PlotData(object):
     '''object to store data about a single FFT plot'''

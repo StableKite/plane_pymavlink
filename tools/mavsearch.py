@@ -3,7 +3,7 @@
 '''
 search a set of log files for a condition
 '''
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)

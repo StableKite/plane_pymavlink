@@ -5,7 +5,7 @@
 
 import unittest
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 
 class InterpretPX4ModeTest(unittest.TestCase):

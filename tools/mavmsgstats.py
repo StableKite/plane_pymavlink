@@ -15,7 +15,7 @@ args = parser.parse_args()
 
 os.environ['MAVLINK20'] = '1'
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 categories = {
     'EKF2' : ['NK*'],

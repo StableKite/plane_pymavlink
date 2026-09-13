@@ -3,7 +3,7 @@
 extract non-default parameters for publishing
 '''
 
-from pymavlink import mavparm
+from plane_pymavlink import mavparm
 import fnmatch
 
 from argparse import ArgumentParser

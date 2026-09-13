@@ -3,7 +3,7 @@
 '''
 test mavlink messages
 '''
-from pymavlink import mavtest, mavutil
+from plane_pymavlink import mavtest, mavutil
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)

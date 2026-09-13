@@ -4,8 +4,8 @@
 Generate a message using different MAVLink versions, put in a buffer and then read from it.
 """
 
-from pymavlink.dialects.v10 import ardupilotmega as mavlink1
-from pymavlink.dialects.v20 import ardupilotmega as mavlink2
+from plane_pymavlink.dialects.v10 import ardupilotmega as mavlink1
+from plane_pymavlink.dialects.v20 import ardupilotmega as mavlink2
 
 class fifo(object):
     def __init__(self):

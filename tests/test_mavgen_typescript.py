@@ -8,7 +8,7 @@ import shutil
 import sys
 
 try:
-    from pymavlink.generator import mavgen
+    from plane_pymavlink.generator import mavgen
 except ModuleNotFoundError:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from generator import mavgen

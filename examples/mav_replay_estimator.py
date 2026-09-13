@@ -14,8 +14,8 @@ parser.add_argument("--graphs", default="EK3.Roll,EK3.Pitch,EST.Roll,EST.Pitch")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
-from pymavlink.rotmat import Vector3, Matrix3
+from plane_pymavlink import mavutil
+from plane_pymavlink.rotmat import Vector3, Matrix3
 from math import degrees
 
 GRAVITY_MSS = 9.80665

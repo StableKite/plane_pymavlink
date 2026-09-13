@@ -6,7 +6,7 @@ parser.add_argument("log")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 def process(logfile):
     '''look for duplicate raw gyro samples'''

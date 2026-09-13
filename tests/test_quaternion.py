@@ -7,8 +7,8 @@ Unit tests for the quaternion library
 
 import unittest
 import numpy as np
-from pymavlink.quaternion import QuaternionBase, Quaternion
-from pymavlink.rotmat import Vector3, Matrix3
+from plane_pymavlink.quaternion import QuaternionBase, Quaternion
+from plane_pymavlink.rotmat import Vector3, Matrix3
 
 __author__ = "Thomas Gubler"
 __copyright__ = "Copyright (C) 2014 Thomas Gubler"

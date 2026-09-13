@@ -8,7 +8,7 @@ Unit tests for the mavparm library
 import unittest
 import os
 
-from pymavlink import mavparm
+from plane_pymavlink import mavparm
 
 class MAVParmDictTest(unittest.TestCase):
 

@@ -6,14 +6,14 @@ Copyright Peter Barker 2021
 
 import optparse
 import os
-import pymavlink
+import plane_pymavlink
 import re
 import select
 import subprocess
 import time
 import fcntl
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 class SerialControlToShell(object):
     '''reads SERIAL_CONTROL packets and passes them to a shell, returning textual  results'''

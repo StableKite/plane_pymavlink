@@ -147,12 +147,12 @@ if build_fast_index:
     extra_link_args = ["-g"] if debug_build else []
     ext_modules += cythonize([
         Extension(
-            name="pymavlink.dfindexer.dfindexer_cy",
+            name="plane_pymavlink.dfindexer.dfindexer_cy",
             sources=[
                 "dfindexer/dfindexer_cy.pyx",
                 "dfindexer/dfindexer.c"
             ],
-            include_dirs=["pymavlink/dfindexer"],
+            include_dirs=["dfindexer"],
             extra_compile_args=extra_compile_args,
             extra_link_args=extra_link_args,
         )

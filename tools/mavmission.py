@@ -10,7 +10,7 @@ parser.add_argument("logs", metavar="LOG", nargs="+")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil, mavwp
+from plane_pymavlink import mavutil, mavwp
 
 parms = {}
 

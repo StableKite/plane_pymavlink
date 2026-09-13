@@ -8,7 +8,7 @@ test for trimming under Python 3
 import unittest
 import os
 import sys
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 class PayLoadTrimZeros(unittest.TestCase):
     '''Trivial test for trimming zeros from end of messages'''

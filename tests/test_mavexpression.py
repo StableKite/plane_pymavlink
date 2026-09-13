@@ -7,7 +7,7 @@ Unit tests for the mavexpression library
 import unittest
 import random
 
-from pymavlink import mavexpression
+from plane_pymavlink import mavexpression
 
 class ExpressionTest(unittest.TestCase):
 

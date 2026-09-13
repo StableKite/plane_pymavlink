@@ -41,12 +41,12 @@ except ImportError:
             pass
 
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 # pylint: disable=too-many-lines
 # mypy: disable-error-code="union-attr,arg-type"
 
-from pymavlink.mavftp_op import (
+from plane_pymavlink.mavftp_op import (
     FTP_OP,
     OP_Ack,
     OP_BurstReadFile,

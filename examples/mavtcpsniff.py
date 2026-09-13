@@ -15,8 +15,8 @@ Released under GNU GPL version 3 or later
 '''
 import time
 
-from pymavlink import mavutil
-#from pymavlink import mavlinkv10 as mavlink
+from plane_pymavlink import mavutil
+#from plane_pymavlink import mavlinkv10 as mavlink
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)

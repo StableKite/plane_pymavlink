@@ -1,1 +1,5 @@
 include dfindexer/dfindexer_cy.pyx
+recursive-include dfindexer *.c *.h *.pyx
+recursive-include message_definitions *.xml
+recursive-include generator *
+recursive-include dialects *.xml

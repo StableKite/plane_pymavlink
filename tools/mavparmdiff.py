@@ -3,7 +3,7 @@
 compare two MAVLink parameter files
 '''
 
-from pymavlink import mavparm
+from plane_pymavlink import mavparm
 
 from argparse import ArgumentParser
 parser = ArgumentParser(description=__doc__)

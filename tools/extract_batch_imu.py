@@ -3,7 +3,7 @@
 '''
 extract ISBH and ISBD messages from AP_Logging files into a bin GYR and ACC log
 '''
-from pymavlink import DFReader
+from plane_pymavlink import DFReader
 from argparse import ArgumentParser
 
 parser = ArgumentParser('Parse bin log into GYR+ACC bin log')
@@ -12,7 +12,7 @@ parser.add_argument("outlog")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 class DF_logger:
     '''write to a DF format log'''

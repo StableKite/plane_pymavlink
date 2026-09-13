@@ -15,7 +15,7 @@ parser.add_argument("logs", metavar="LOG", nargs="+")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 try:
     raw_input          # Python 2

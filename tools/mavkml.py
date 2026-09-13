@@ -7,8 +7,8 @@ Thomas Gubler <thomasgubler@gmail.com>
 
 from argparse import ArgumentParser
 import simplekml
-from pymavlink.mavextra import *
-from pymavlink import mavutil
+from plane_pymavlink.mavextra import *
+from plane_pymavlink import mavutil
 import time
 import re
 import os

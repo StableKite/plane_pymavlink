@@ -14,17 +14,17 @@ import re
 import platform
 from types import ModuleType
 from typing import Any
-from pymavlink import mavexpression
+from plane_pymavlink import mavexpression
 import ssl
 
 # We want to re-export x25crc here
-from pymavlink.generator.mavcrc import x25crc as x25crc
+from plane_pymavlink.generator.mavcrc import x25crc as x25crc
 
 # adding these extra imports allows pymavlink to be used directly with pyinstaller
 # without having complex spec files. To allow for installs that don't have the "all" dialect
 # at all we avoid throwing an exception if it isn't installed
 try:
-    from pymavlink.dialects.v10 import all
+    from plane_pymavlink.dialects.v10 import all
 except Exception:
     pass
 
@@ -118,13 +118,13 @@ def set_dialect(dialect: str, with_type_annotations: bool | None = None) -> None
 
     if 'MAVLINK20' in os.environ:
         wire_protocol = mavparse.PROTOCOL_2_0
-        modname = "pymavlink.dialects.v20." + dialect
+        modname = "plane_pymavlink.dialects.v20." + dialect
     elif mavlink is None or mavlink.WIRE_PROTOCOL_VERSION == "1.0" or not 'MAVLINK09' in os.environ:
         wire_protocol = mavparse.PROTOCOL_1_0
-        modname = "pymavlink.dialects.v10." + dialect
+        modname = "plane_pymavlink.dialects.v10." + dialect
     else:
         wire_protocol = mavparse.PROTOCOL_0_9
-        modname = "pymavlink.dialects.v09." + dialect
+        modname = "plane_pymavlink.dialects.v09." + dialect
 
     try:
         mod = __import__(modname)
@@ -2161,14 +2161,14 @@ def mavlink_connection(device, baud=115200, source_system=255, source_component=
 
     if device.lower().endswith('.bin') or device.lower().endswith('.px4log'):
         # support dataflash logs
-        from pymavlink import DFReader
+        from plane_pymavlink import DFReader
         m = DFReader.DFReader_binary(device, zero_time_base=zero_time_base, progress_callback=progress_callback)
         mavfile_global = m
         return m
 
     if device.lower().startswith('csv:'):
         # support CSV logs
-        from pymavlink import CSVReader
+        from plane_pymavlink import CSVReader
         # special-case for users wanting a : separator:
         colon_separator_re = ""
         if re.match(".*separator=::?.*", device):
@@ -2188,7 +2188,7 @@ def mavlink_connection(device, baud=115200, source_system=255, source_component=
 
     if device.endswith('.log'):
         # support dataflash text logs
-        from pymavlink import DFReader
+        from plane_pymavlink import DFReader
         if DFReader.DFReader_is_text_log(device):
             m = DFReader.DFReader_text(device, zero_time_base=zero_time_base, progress_callback=progress_callback)
             mavfile_global = m

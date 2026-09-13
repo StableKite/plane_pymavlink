@@ -17,7 +17,7 @@ import os
 import sys
 import time
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 
 class BitmaskChange(object):

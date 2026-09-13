@@ -10,7 +10,7 @@ import unittest
 import random
 import numpy as np
 
-from pymavlink.rotmat import Vector3, Matrix3, Plane, Line
+from plane_pymavlink.rotmat import Vector3, Matrix3, Plane, Line
 
 class VectorTest(unittest.TestCase):
 

@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 
 from fuse import FUSE, FuseOSError, LoggingMixIn, Operations
 from loguru import logger
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 from mavftp import MAVFTP
 

@@ -6,7 +6,7 @@ Unit tests for the fgFDM library
 """
 import unittest
 
-from pymavlink.fgFDM import fgFDMError, fgFDMVariable, fgFDMVariableList, fgFDM
+from plane_pymavlink.fgFDM import fgFDMError, fgFDMVariable, fgFDMVariableList, fgFDM
 
 
 class fgFDMErrorTest(unittest.TestCase):

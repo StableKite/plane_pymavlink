@@ -5,7 +5,7 @@ check bandwidth of link
 '''
 import time
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 #using argparse to receive options from the command line
 from argparse import ArgumentParser

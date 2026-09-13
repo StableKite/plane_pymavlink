@@ -8,7 +8,7 @@ import shutil
 import subprocess
 
 import pytest
-from pymavlink.generator import mavgen
+from plane_pymavlink.generator import mavgen
 
 
 def generate_wlua(xml_filepath, dest_dir):

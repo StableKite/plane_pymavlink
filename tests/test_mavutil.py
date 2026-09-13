@@ -7,7 +7,7 @@ import tempfile
 import threading
 import unittest
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 
 class TestUnixDomainSocket(unittest.TestCase):

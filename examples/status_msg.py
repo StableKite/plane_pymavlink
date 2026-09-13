@@ -14,7 +14,7 @@ from argparse import ArgumentParser
 
 from typing import List
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 #FLAKE_CLEAN
 
@@ -158,8 +158,8 @@ class FlightcontrollerInfo:  # pylint: disable=too-many-instance-attributes
 
 
     # see for more info:
-    # import pymavlink.dialects.v20.ardupilotmega
-    # pymavlink.dialects.v20.ardupilotmega.enums["MAV_TYPE"]
+    # import plane_pymavlink.dialects.v20.ardupilotmega
+    # plane_pymavlink.dialects.v20.ardupilotmega.enums["MAV_TYPE"]
     @staticmethod
     def __decode_mav_type(mav_type):
         return mavutil.mavlink.enums["MAV_TYPE"].get(mav_type,

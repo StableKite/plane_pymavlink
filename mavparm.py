@@ -2,7 +2,7 @@
 module for loading/saving sets of mavlink parameters
 '''
 import fnmatch, math, time, struct
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 class MAVParmDict(dict):
     def __init__(self, *args):

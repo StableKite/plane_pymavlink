@@ -95,7 +95,7 @@ def mag_field_df(MAG, ofs=None, diagonals=(1.0,1.0,1.0), offdiagonals=(0.0,0.0,0
 def mag_heading_df(MAG, ATT, declination=None, ofs=None, diagonals=(1.0,1.0,1.0), offdiagonals=(0.0,0.0,0.0)):
     '''calculate heading from raw magnetometer'''
     if declination is None:
-        from pymavlink import mavutil
+        from plane_pymavlink import mavutil
         declination = degrees(mavutil.mavfile_global.param('COMPASS_DEC', 0))
     mag = Vector3(MAG.MagX,MAG.MagY,MAG.MagZ)
     if ofs is not None:
@@ -1205,7 +1205,7 @@ def gps_velocity_df(GPS):
 
 def armed(HEARTBEAT):
     '''return 1 if armed, 0 if not'''
-    from pymavlink import mavutil
+    from plane_pymavlink import mavutil
     if HEARTBEAT.type == mavutil.mavlink.MAV_TYPE_GCS:
         self = mavutil.mavfile_global
         if self.motors_armed():
@@ -1217,7 +1217,7 @@ def armed(HEARTBEAT):
 
 def mode(HEARTBEAT):
     '''return flight mode number'''
-    from pymavlink import mavutil
+    from plane_pymavlink import mavutil
     if HEARTBEAT.type == mavutil.mavlink.MAV_TYPE_GCS:
         return None
     return HEARTBEAT.custom_mode
@@ -1484,7 +1484,7 @@ def airspeed_estimate(GLOBAL_POSITION_INT,WIND):
     '''estimate airspeed'''
     wind = WIND
     gpi = GLOBAL_POSITION_INT
-    from pymavlink.rotmat import Vector3
+    from plane_pymavlink.rotmat import Vector3
     import math
     wind3d = Vector3(wind.speed*math.cos(math.radians(wind.direction)),
                      wind.speed*math.sin(math.radians(wind.direction)), 0)

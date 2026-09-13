@@ -13,8 +13,8 @@ if __name__ == "__main__" and __package__ is None:
     from os import sys, path
     sys.path.insert(0, path.dirname(path.dirname(path.dirname(path.abspath(__file__)))))
 
-from pymavlink.generator import mavgen
-from pymavlink.generator import mavparse
+from plane_pymavlink.generator import mavgen
+from plane_pymavlink.generator import mavparse
 
 from argparse import ArgumentParser
 

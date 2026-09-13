@@ -34,10 +34,10 @@ parser.add_argument("log", metavar="LOG")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
-from pymavlink import mavextra
-from pymavlink.rotmat import Vector3
-from pymavlink.rotmat import Matrix3
+from plane_pymavlink import mavutil
+from plane_pymavlink import mavextra
+from plane_pymavlink.rotmat import Vector3
+from plane_pymavlink.rotmat import Matrix3
 
 import matplotlib
 import matplotlib.pyplot as pyplot

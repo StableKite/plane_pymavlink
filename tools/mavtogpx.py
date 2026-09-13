@@ -15,7 +15,7 @@ parser.add_argument("--type", default=[], nargs="*")
 parser.add_argument("logs", metavar="LOG", nargs="+")
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 
 def mav_to_gpx(infilename, outfilename, display_types=None):
@@ -41,7 +41,7 @@ def mav_to_gpx(infilename, outfilename, display_types=None):
         outf.write('''<?xml version="1.0" encoding="UTF-8"?>
 <gpx
   version="1.0"
-  creator="pymavlink"
+  creator="plane_pymavlink"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns="http://www.topografix.com/GPX/1/0"
   xsi:schemaLocation="http://www.topografix.com/GPX/1/0 http://www.topografix.com/GPX/1/0/gpx.xsd">

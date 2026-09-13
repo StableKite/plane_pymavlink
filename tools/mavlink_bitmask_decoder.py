@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 import argparse
 

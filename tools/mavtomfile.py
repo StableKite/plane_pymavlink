@@ -7,7 +7,7 @@ convert a MAVLink tlog file to a MATLab mfile
 import os
 import re
 import sys
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 def process_tlog(filename):
     '''convert a tlog to a .m file'''

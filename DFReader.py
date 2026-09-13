@@ -25,8 +25,8 @@ try:
     from . import dfindexer
 except ImportError:
     # allows running uninstalled
-    from pymavlink import mavutil
-    from pymavlink import dfindexer
+    from plane_pymavlink import mavutil
+    from plane_pymavlink import dfindexer
 
 try:
     long        # Python 2 has long

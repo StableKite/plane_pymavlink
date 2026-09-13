@@ -21,7 +21,7 @@ if home is not None:
     if os.path.exists(extra):
         try:
             import imp
-            mavuser = imp.load_source('pymavlink.mavuser', extra)
+            mavuser = imp.load_source('plane_pymavlink.mavuser', extra)
         except ModuleNotFoundError:
             # "imp" is removed in Python 3.12.  Try to use importlib instead:
             import sys
@@ -39,9 +39,9 @@ if home is not None:
                 loader.exec_module(module)
                 return module
 
-            load_source('pymavlink.mavuser', extra)
+            load_source('plane_pymavlink.mavuser', extra)
 
-        from pymavlink.mavuser import *
+        from plane_pymavlink.mavuser import *
 
 def evaluate_expression(expression, vars, nocondition=False):
     '''evaluation an expression'''

@@ -17,11 +17,11 @@ import subprocess
 import sys
 import tempfile
 
-import pymavlink
-from pymavlink.generator import mavgen
-from pymavlink.mavutil import mavlink_connection
+import plane_pymavlink
+from plane_pymavlink.generator import mavgen
+from plane_pymavlink.mavutil import mavlink_connection
 
-FROM_TO_REQUIRED = "Specify at least 'from' or 'to' definition, with the unspecified one assumed to be installed pymavlink."
+FROM_TO_REQUIRED = "Specify at least 'from' or 'to' definition, with the unspecified one assumed to be installed plane_pymavlink."
 parser = ArgumentParser(description=__doc__, epilog=FROM_TO_REQUIRED)
 
 parser.add_argument("-o", "--output", help="output matching packets to given file, by default will append '_translated' to input file name", default=None)
@@ -68,10 +68,10 @@ if (args_from is not None and args_from_repository.endswith(".git")) or \
 repository_checkouts = {}
 
 def protocol_module(identifier, repository, dialect):
-    # type: (str | None, str, str) -> pymavlink.dialects.v20.all
+    # type: (str | None, str, str) -> plane_pymavlink.dialects.v20.all
 
     if identifier is None:
-        return importlib.import_module("pymavlink.dialects.v20." + dialect)
+        return importlib.import_module("plane_pymavlink.dialects.v20." + dialect)
     else:
         dialect_path = identifier
         if not os.path.isfile(dialect_path) or not dialect_path.endswith(".xml"):

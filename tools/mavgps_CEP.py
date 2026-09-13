@@ -14,8 +14,8 @@ parser.add_argument("logs", metavar="LOG", nargs="+")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
-from pymavlink.mavextra import *
+from plane_pymavlink import mavutil
+from plane_pymavlink.mavextra import *
 
 # full set of data, indexed by sysId and
 DATA = {}

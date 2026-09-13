@@ -13,7 +13,7 @@ import time
 from math import *
 
 try:
-    from pymavlink.mavextra import *
+    from plane_pymavlink.mavextra import *
 except:
     print("WARNING: Numpy missing, mathematical notation will not be supported.")
 
@@ -197,7 +197,7 @@ parser.add_argument("--timeshift", type=float, default=0, help="shift time on fi
 parser.add_argument("logs_fields", metavar="<LOG or FIELD>", nargs="+")
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 if args.flightmode is not None and args.xaxis:
     print("Cannot request flightmode backgrounds with an x-axis expression")

@@ -41,10 +41,8 @@ jobs:
       # NOTE: we must do all testing on the installed python package, not
       # on the build tree. Otherwise the testing is invalid and may not
       # indicate the code actually works
-      - name: Install mavlink message
-        run: |
-          git clone https://github.com/ArduPilot/mavlink.git
-          ln -s $PWD/mavlink/message_definitions ../
+      - name: Verify bundled MAVLink definitions
+        run: test -f message_definitions/v1.0/common.xml
 
       - name: Install pymavlink
         run: |
@@ -94,10 +92,8 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
-      - name: Install mavlink message
-        run: |
-          git clone https://github.com/ArduPilot/mavlink.git
-          ln -s $PWD/mavlink/message_definitions ../
+      - name: Verify bundled MAVLink definitions
+        run: test -f message_definitions/v1.0/common.xml
       - run: cd "generator/javascript" && npm install
       - name : Test mavlink
         run: |

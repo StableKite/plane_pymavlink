@@ -24,8 +24,8 @@ import sys
 import requests
 
 
-from pymavlink import mavutil
-from pymavlink import mavftp
+from plane_pymavlink import mavutil
+from plane_pymavlink import mavftp
 
 old_mavftp_member_variable_values = {}
 

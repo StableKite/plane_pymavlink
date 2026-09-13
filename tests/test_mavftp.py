@@ -12,13 +12,13 @@ import unittest
 #from unittest.mock import patch
 from io import StringIO
 import logging
-from pymavlink import mavutil
-from pymavlink.mavftp import FTP_OP, MAVFTP, MAVFTPReturn
-from pymavlink.mavftp import FtpError
-from pymavlink.mavftp import OP_ListDirectory
-from pymavlink.mavftp import OP_ReadFile
-from pymavlink.mavftp import OP_Ack
-from pymavlink.mavftp import OP_Nack
+from plane_pymavlink import mavutil
+from plane_pymavlink.mavftp import FTP_OP, MAVFTP, MAVFTPReturn
+from plane_pymavlink.mavftp import FtpError
+from plane_pymavlink.mavftp import OP_ListDirectory
+from plane_pymavlink.mavftp import OP_ReadFile
+from plane_pymavlink.mavftp import OP_Ack
+from plane_pymavlink.mavftp import OP_Nack
 
 class TestMAVFTPPayloadDecoding(unittest.TestCase):
     """Test MAVFTP payload decoding"""

@@ -26,9 +26,9 @@ parser.add_argument("logs", metavar="LOG", nargs="+")
 
 args = parser.parse_args()
 
-from pymavlink import mavutil
-from pymavlink.mavextra import *
-from pymavlink.rotmat import Vector3
+from plane_pymavlink import mavutil
+from plane_pymavlink.mavextra import *
+from plane_pymavlink.rotmat import Vector3
 
 '''
 Support having a $HOME/.pymavlink/mavextra.py for extra graphing functions
@@ -38,8 +38,8 @@ if home is not None:
     extra = os.path.join(home, '.pymavlink', 'mavextra.py')
     if os.path.exists(extra):
         import imp
-        mavuser = imp.load_source('pymavlink.mavuser', extra)
-        from pymavlink.mavuser import *
+        mavuser = imp.load_source('plane_pymavlink.mavuser', extra)
+        from plane_pymavlink.mavuser import *
 
 
 def velocity_error(timestamps, vel, gaccel, accel_indexes, imu_dt, shift=0):

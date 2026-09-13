@@ -1,0 +1,778 @@
+name: Validate, build and publish plane_pymavlink
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DEVPI_SERVER: https://stablekite.com:4438/
+  DEVPI_TARGET_INDEX: https://stablekite.com:4438/StableKite/index/
+
+jobs:
+  validate:
+    name: Validate package and Plane protocol
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.14t
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+
+      - name: Install validation dependency
+        run: python -m pip install --upgrade lxml
+
+      - name: Validate StableKite namespace and protocol definitions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          from pathlib import Path
+          import re
+          import struct
+          import subprocess
+          import sys
+          import xml.etree.ElementTree as ET
+
+          root = Path.cwd()
+          setup = (root / "setup.py").read_text(encoding="utf-8")
+
+          required_setup_fragments = (
+              "setup (name = 'plane_pymavlink',",
+              "package_dir = { 'plane_pymavlink' : '.' },",
+              "'plane_pymavlink.generator',",
+              "'plane_pymavlink.dialects.v20',",
+              'name="plane_pymavlink.dfindexer.dfindexer_cy"',
+          )
+          for fragment in required_setup_fragments:
+              if fragment not in setup:
+                  raise SystemExit(
+                      f"setup.py is missing expected StableKite namespace: {fragment}"
+                  )
+
+          tracked = subprocess.check_output(
+              ["git", "ls-files", "-z"],
+          ).split(b"\0")
+
+          functional_old_namespace = (
+              re.compile(rb"\bfrom\s+pymavlink\b"),
+              re.compile(rb"\bimport\s+pymavlink\b"),
+              re.compile(rb"\bpymavlink\."),
+              re.compile(rb"['\"]pymavlink['\"]"),
+          )
+
+          bad = []
+          # Scan runtime/source files, not workflow/config files. The workflow
+          # itself intentionally contains the old namespace as a negative-test
+          # string (for example find_spec("pymavlink")).
+          code_suffixes = {
+              ".py", ".pyi", ".pyx", ".pxd", ".sh",
+          }
+
+          for raw_name in tracked:
+              if not raw_name:
+                  continue
+              path = Path(raw_name.decode("utf-8"))
+              if path.parts and path.parts[0] == ".github":
+                  continue
+              if path.suffix.lower() not in code_suffixes:
+                  continue
+              data = path.read_bytes()
+              if any(pattern.search(data) for pattern in functional_old_namespace):
+                  bad.append(str(path))
+
+          if bad:
+              raise SystemExit(
+                  "Functional references to old Python namespace 'pymavlink' remain:\n"
+                  + "\n".join(sorted(bad))
+              )
+
+          common_xml = root / "message_definitions/v1.0/common.xml"
+          tree = ET.parse(common_xml)
+          mavlink = tree.getroot()
+
+          messages = {
+              int(message.attrib["id"]): message
+              for message in mavlink.findall("./messages/message")
+          }
+
+          expected = {
+              3: (
+                  "PLANE_TARGET_BBOX",
+                  [
+                      ("time_boot_ms", "uint32_t"),
+                      ("shoot_time_ms", "uint32_t"),
+                      ("time", "uint32_t"),
+                      ("score", "float"),
+                      ("left", "float"),
+                      ("top", "float"),
+                      ("right", "float"),
+                      ("bottom", "float"),
+                      ("target_id", "int8_t"),
+                      ("track_id", "uint8_t"),
+                  ],
+                  35,
+              ),
+              9: (
+                  "PLANE_TARGET_ID",
+                  [
+                      ("time_boot_ms", "uint32_t"),
+                      ("target_id", "int8_t"),
+                  ],
+                  6,
+              ),
+              10: (
+                  "PLANE_NO_TARGET",
+                  [
+                      ("time_boot_ms", "uint32_t"),
+                      ("shoot_time_ms", "uint32_t"),
+                  ],
+                  9,
+              ),
+          }
+
+          sizes = {
+              "uint8_t": 1,
+              "int8_t": 1,
+              "uint32_t": 4,
+              "float": 4,
+          }
+
+          for message_id, (name, fields, raw_size) in expected.items():
+              message = messages.get(message_id)
+              if message is None:
+                  raise SystemExit(f"Missing {name} ({message_id})")
+              if message.attrib.get("name") != name:
+                  raise SystemExit(
+                      f"Message {message_id} has wrong name "
+                      f"{message.attrib.get('name')!r}"
+                  )
+
+              actual = [
+                  (field.attrib["name"], field.attrib["type"])
+                  for field in message.findall("field")
+              ]
+              if actual != fields:
+                  raise SystemExit(
+                      f"{name} fields do not match StableKite protocol:\n"
+                      f"expected={fields}\nactual={actual}"
+                  )
+
+              calculated = 1 + sum(
+                  sizes[field_type]
+                  for _, field_type in actual
+              )
+              if calculated != raw_size:
+                  raise SystemExit(
+                      f"{name}: expected {raw_size} raw UDP bytes, "
+                      f"calculated {calculated}"
+                  )
+
+          assert struct.calcsize("<BIIIfffffbB") == 35
+          assert struct.calcsize("<BIb") == 6
+          assert struct.calcsize("<BII") == 9
+
+          # Validate the actual MAVLink schema/generator using the bundled,
+          # StableKite-synchronised message definitions.
+          sys.path.insert(0, str(root))
+          from generator import mavgen, mavparse
+
+          generated = root / ".ci-generated/common.py"
+          generated.parent.mkdir(parents=True, exist_ok=True)
+
+          opts = mavgen.Opts(
+              str(generated),
+              wire_protocol=mavparse.PROTOCOL_2_0,
+              language="Python3",
+              validate=True,
+          )
+
+          if not mavgen.mavgen(opts, [str(common_xml)]):
+              raise SystemExit("MAVLink common dialect generation failed")
+
+          generated_text = generated.read_text(encoding="utf-8")
+          for marker in (
+              "MAVLink_plane_target_bbox_message",
+              "MAVLink_plane_target_id_message",
+              "MAVLink_plane_no_target_message",
+          ):
+              if marker not in generated_text:
+                  raise SystemExit(
+                      f"Generated common dialect is missing {marker!r}"
+                  )
+
+          # Generated MAVLink dialect modules are deliberately self-contained;
+          # they are package data/modules when installed under plane_pymavlink,
+          # but the generated source itself does not need to spell that package
+          # namespace. Validate the generated module by importing it.
+          import importlib.util
+          import io
+
+          spec = importlib.util.spec_from_file_location(
+              "stablekite_generated_common",
+              generated,
+          )
+          if spec is None or spec.loader is None:
+              raise SystemExit("Could not create import spec for generated common.py")
+
+          generated_common = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(generated_common)
+
+          bbox_cls = generated_common.MAVLink_plane_target_bbox_message
+          target_cls = generated_common.MAVLink_plane_target_id_message
+          no_target_cls = generated_common.MAVLink_plane_no_target_message
+
+          assert bbox_cls.id == 3
+          assert target_cls.id == 9
+          assert no_target_cls.id == 10
+
+          assert list(bbox_cls.fieldnames) == [
+              "time_boot_ms",
+              "shoot_time_ms",
+              "time",
+              "score",
+              "left",
+              "top",
+              "right",
+              "bottom",
+              "target_id",
+              "track_id",
+          ]
+          assert list(target_cls.fieldnames) == [
+              "time_boot_ms",
+              "target_id",
+          ]
+          assert list(no_target_cls.fieldnames) == [
+              "time_boot_ms",
+              "shoot_time_ms",
+          ]
+
+          mav = generated_common.MAVLink(io.BytesIO())
+          assert bbox_cls(
+              time_boot_ms=1,
+              shoot_time_ms=2,
+              time=3,
+              score=0.9,
+              left=0.1,
+              top=0.2,
+              right=0.8,
+              bottom=0.9,
+              target_id=7,
+              track_id=8,
+          ).pack(mav)[1] == 34
+          assert target_cls(
+              time_boot_ms=1,
+              target_id=-1,
+          ).pack(mav)[1] == 5
+          # The declared MAVLink payload sizes are 34 / 5 / 8 bytes.
+          # MAVLink 2 is allowed to truncate trailing zero bytes on the wire,
+          # so a small uint32_t value such as shoot_time_ms=2 makes
+          # PLANE_NO_TARGET serialize with mlen=5 even though its full payload
+          # schema is 8 bytes. Verify both the schema size and that behavior.
+          assert bbox_cls.unpacker.size == 34
+          assert target_cls.unpacker.size == 5
+          assert no_target_cls.unpacker.size == 8
+
+          assert no_target_cls(
+              time_boot_ms=1,
+              shoot_time_ms=0x01000000,
+          ).pack(mav)[1] == 8
+
+          assert no_target_cls(
+              time_boot_ms=1,
+              shoot_time_ms=2,
+          ).pack(mav)[1] == 5
+
+          print("StableKite package namespace: plane_pymavlink")
+          print("Raw UDP datagrams: fixed 35 / 6 / 9 bytes")
+          print("MAVLink declared payloads: 34 / 5 / 8 bytes")
+          print("MAVLink 2 trailing-zero truncation: verified")
+          print("MAVLink v2 generation/import: OK")
+          PY
+
+  build:
+    name: Build plane_pymavlink
+    needs: validate
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python 3.14t
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+
+      - name: Install build tools
+        run: >-
+          python -m pip install --upgrade
+          build
+          setuptools
+          wheel
+          cython
+          lxml
+
+      - name: Build wheel and source distribution
+        shell: bash
+        env:
+          PYMAVLINK_FAST_INDEX: "0"
+          MDEF: ${{ github.workspace }}/message_definitions
+        run: |
+          set -euo pipefail
+          python -m build \
+            --no-isolation \
+            --wheel \
+            --sdist \
+            --outdir dist
+
+      - name: Verify distributions
+        shell: bash
+        run: |
+          python - <<'PY'
+          from email.parser import BytesParser
+          from email.policy import default
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          dist = Path("dist")
+          wheels = list(dist.glob("*.whl"))
+          sdists = list(dist.glob("*.tar.gz"))
+
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected exactly one wheel, got {wheels}")
+          if len(sdists) != 1:
+              raise SystemExit(f"Expected exactly one sdist, got {sdists}")
+
+          wheel = wheels[0]
+          sdist = sdists[0]
+
+          if not wheel.name.startswith("plane_pymavlink-"):
+              raise SystemExit(f"Unexpected wheel name: {wheel.name}")
+          if not wheel.name.endswith("-py3-none-any.whl"):
+              raise SystemExit(
+                  "PYMAVLINK_FAST_INDEX=0 should produce a pure-Python wheel: "
+                  + wheel.name
+              )
+
+          with zipfile.ZipFile(wheel) as archive:
+              bad_member = archive.testzip()
+              if bad_member is not None:
+                  raise SystemExit(f"Corrupt wheel member: {bad_member}")
+
+              names = set(archive.namelist())
+
+              required = {
+                  "plane_pymavlink/__init__.py",
+                  "plane_pymavlink/generator/mavcrc.py",
+                  "plane_pymavlink/dialects/v20/common.py",
+              }
+              missing = sorted(required - names)
+              if missing:
+                  raise SystemExit(f"Wheel is missing {missing}")
+
+              if any(name.startswith("pymavlink/") for name in names):
+                  raise SystemExit(
+                      "Wheel unexpectedly exposes old pymavlink namespace"
+                  )
+
+              generated = archive.read(
+                  "plane_pymavlink/dialects/v20/common.py"
+              ).decode("utf-8")
+
+              for marker in (
+                  "MAVLink_plane_target_bbox_message",
+                  "MAVLink_plane_target_id_message",
+                  "MAVLink_plane_no_target_message",
+              ):
+                  if marker not in generated:
+                      raise SystemExit(
+                          f"Generated common.py is missing {marker!r}"
+                      )
+
+              metadata_name = next(
+                  name
+                  for name in names
+                  if name.endswith(".dist-info/METADATA")
+              )
+              metadata = BytesParser(
+                  policy=default,
+              ).parsebytes(
+                  archive.read(metadata_name)
+              )
+
+          if metadata["Name"].lower().replace("-", "_") != "plane_pymavlink":
+              raise SystemExit(
+                  f"Unexpected distribution name: {metadata['Name']!r}"
+              )
+
+          version = metadata["Version"]
+          if not version:
+              raise SystemExit("Package version is empty")
+
+          with tarfile.open(sdist, "r:gz") as archive:
+              sdist_names = archive.getnames()
+              required_suffixes = (
+                  "/setup.py",
+                  "/pyproject.toml",
+                  "/MANIFEST.in",
+                  "/message_definitions/v1.0/common.xml",
+                  "/generator/mavschema.xsd",
+              )
+              for suffix in required_suffixes:
+                  if not any(name.endswith(suffix) for name in sdist_names):
+                      raise SystemExit(
+                          f"Source distribution is missing {suffix}"
+                      )
+
+          print("Wheel:", wheel.name)
+          print("Sdist:", sdist.name)
+          print("Version:", version)
+          PY
+
+      - name: Rebuild wheel from source distribution
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          rm -rf sdist-check rebuilt-wheel
+          mkdir -p sdist-check rebuilt-wheel
+
+          mapfile -t sdists < <(
+            find dist -maxdepth 1 -type f -name '*.tar.gz' -print
+          )
+
+          if [ "${#sdists[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one sdist."
+            exit 1
+          fi
+
+          tar -xzf "${sdists[0]}" -C sdist-check
+
+          mapfile -t roots < <(
+            find sdist-check -mindepth 1 -maxdepth 1 -type d -print
+          )
+
+          if [ "${#roots[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one extracted sdist root."
+            exit 1
+          fi
+
+          (
+            cd "${roots[0]}"
+            export PYMAVLINK_FAST_INDEX=0
+            export MDEF="$PWD/message_definitions"
+
+            python -m build \
+              --no-isolation \
+              --wheel \
+              --outdir "$GITHUB_WORKSPACE/rebuilt-wheel"
+          )
+
+          python - <<'PY'
+          from pathlib import Path
+          import zipfile
+
+          wheels = list(Path("rebuilt-wheel").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(
+                  f"Expected exactly one rebuilt wheel, got {wheels}"
+              )
+
+          wheel = wheels[0]
+          if not wheel.name.endswith("-py3-none-any.whl"):
+              raise SystemExit(f"Unexpected rebuilt wheel: {wheel.name}")
+
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+              if "plane_pymavlink/dialects/v20/common.py" not in names:
+                  raise SystemExit(
+                      "Rebuilt wheel is missing Plane common dialect"
+                  )
+              if any(name.startswith("pymavlink/") for name in names):
+                  raise SystemExit(
+                      "Rebuilt wheel exposes old pymavlink namespace"
+                  )
+
+          print("Rebuilt from sdist:", wheel.name)
+          PY
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  test:
+    name: Test / ${{ matrix.target }}
+    needs: build
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Linux x86_64
+            runner: ubuntu-24.04
+          - target: Linux aarch64
+            runner: ubuntu-24.04-arm
+          - target: Windows x86_64
+            runner: windows-latest
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist
+
+      - name: Set up Python 3.14t
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14t"
+
+      - name: Install built wheel without dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(
+            find dist -maxdepth 1 -type f -name '*.whl' -print
+          )
+
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one wheel."
+            exit 1
+          fi
+
+          python -m pip install \
+            --force-reinstall \
+            --no-deps \
+            "${wheels[0]}"
+
+      - name: Smoke-test installed namespace and Plane messages
+        shell: bash
+        run: |
+          python - <<'PY'
+          from importlib import metadata, util
+          import io
+          import sysconfig
+
+          if sysconfig.get_config_var("Py_GIL_DISABLED") != 1:
+              raise SystemExit("Expected CPython free-threaded build")
+
+          # This is an intentional compatibility-negative check. It is why
+          # the source namespace scanner above excludes the workflow file itself.
+          if util.find_spec("pymavlink") is not None:
+              raise SystemExit(
+                  "Old pymavlink import namespace unexpectedly exists"
+              )
+
+          import plane_pymavlink
+          from plane_pymavlink.generator.mavcrc import x25crc
+          from plane_pymavlink.dialects.v20 import common
+
+          if plane_pymavlink.__version__ != metadata.version(
+              "plane_pymavlink"
+          ):
+              raise SystemExit("Package/distribution version mismatch")
+
+          # Ensure the generator package really imports under StableKite's
+          # namespace rather than only the top-level package doing so.
+          crc = x25crc()
+          crc.accumulate(b"abc")
+          if not isinstance(crc.crc, int):
+              raise SystemExit("x25crc smoke test failed")
+
+          bbox_cls = common.MAVLink_plane_target_bbox_message
+          target_cls = common.MAVLink_plane_target_id_message
+          no_target_cls = common.MAVLink_plane_no_target_message
+
+          assert bbox_cls.id == 3
+          assert target_cls.id == 9
+          assert no_target_cls.id == 10
+
+          assert list(bbox_cls.fieldnames) == [
+              "time_boot_ms",
+              "shoot_time_ms",
+              "time",
+              "score",
+              "left",
+              "top",
+              "right",
+              "bottom",
+              "target_id",
+              "track_id",
+          ]
+          assert list(target_cls.fieldnames) == [
+              "time_boot_ms",
+              "target_id",
+          ]
+          assert list(no_target_cls.fieldnames) == [
+              "time_boot_ms",
+              "shoot_time_ms",
+          ]
+
+          mav = common.MAVLink(io.BytesIO())
+
+          bbox = bbox_cls(
+              time_boot_ms=1,
+              shoot_time_ms=2,
+              time=3,
+              score=0.9,
+              left=0.1,
+              top=0.2,
+              right=0.8,
+              bottom=0.9,
+              target_id=7,
+              track_id=7,
+          )
+          target = target_cls(
+              time_boot_ms=1,
+              target_id=-1,
+          )
+          no_target = no_target_cls(
+              time_boot_ms=1,
+              shoot_time_ms=2,
+          )
+
+          assert bbox_cls.unpacker.size == 34
+          assert target_cls.unpacker.size == 5
+          assert no_target_cls.unpacker.size == 8
+
+          assert bbox.pack(mav)[1] == 34
+          assert target.pack(mav)[1] == 5
+
+          # MAVLink 2 trims trailing zero bytes. shoot_time_ms=2 therefore
+          # produces mlen=5, while a value with a non-zero high byte exercises
+          # the full declared 8-byte PLANE_NO_TARGET payload.
+          assert no_target.pack(mav)[1] == 5
+          no_target_full = no_target_cls(
+              time_boot_ms=1,
+              shoot_time_ms=0x01000000,
+          )
+          assert no_target_full.pack(mav)[1] == 8
+          assert target.target_id == -1
+
+          print("Distribution:", metadata.version("plane_pymavlink"))
+          print("Import namespace:", plane_pymavlink.__name__)
+          print("Common dialect:", common.__file__)
+          print("Plane messages smoke-test OK")
+          PY
+
+  publish:
+    name: Publish to devpi
+    needs:
+      - build
+      - test
+
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      github.event_name != 'pull_request'
+
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Verify downloaded artifacts
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          wheels = list(Path("dist").glob("*.whl"))
+          sdists = list(Path("dist").glob("*.tar.gz"))
+
+          if len(wheels) != 1:
+              raise SystemExit(
+                  f"Expected exactly one wheel, got {wheels}"
+              )
+          if len(sdists) != 1:
+              raise SystemExit(
+                  f"Expected exactly one sdist, got {sdists}"
+              )
+
+          wheel = wheels[0]
+          sdist = sdists[0]
+
+          if not wheel.name.startswith("plane_pymavlink-"):
+              raise SystemExit(f"Unexpected wheel: {wheel.name}")
+
+          with zipfile.ZipFile(wheel) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Corrupt wheel member: {bad}")
+
+          with tarfile.open(sdist, "r:gz") as archive:
+              archive.getmembers()
+
+          print("Ready to publish:")
+          print(" ", wheel.name)
+          print(" ", sdist.name)
+          PY
+
+      - name: Install devpi tools
+        run: >-
+          python -m pip install
+          devpi-client
+          devpi-tokens
+
+      - name: Publish
+        env:
+          DEVPI_TOKEN: ${{ secrets.DEVPI_TOKEN }}
+          DEVPI_CLIENTDIR: ${{ runner.temp }}/devpi-client
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DEVPI_TOKEN:-}" ]; then
+            echo "::error::DEVPI_TOKEN is not available to this repository."
+            exit 1
+          fi
+
+          TOKEN_FILE="$RUNNER_TEMP/devpi-token"
+          printf '%s' "$DEVPI_TOKEN" > "$TOKEN_FILE"
+          chmod 600 "$TOKEN_FILE"
+
+          cleanup() {
+            rm -f "$TOKEN_FILE"
+            rm -rf "$DEVPI_CLIENTDIR"
+          }
+          trap cleanup EXIT
+
+          devpi use "$DEVPI_SERVER"
+          devpi token-login -f "$TOKEN_FILE"
+          devpi use "$DEVPI_TARGET_INDEX"
+          devpi upload dist/*

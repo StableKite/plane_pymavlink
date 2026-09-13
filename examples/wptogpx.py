@@ -12,7 +12,7 @@ parser = ArgumentParser(description=__doc__)
 parser.add_argument("wpfiles", metavar="WP_FILE", nargs="+")
 args = parser.parse_args()
 
-from pymavlink import mavwp
+from plane_pymavlink import mavwp
 
 
 def wp_to_gpx(infilename, outfilename):
@@ -34,7 +34,7 @@ def wp_to_gpx(infilename, outfilename):
         outf.write('''<?xml version="1.0" encoding="UTF-8"?>
 <gpx
   version="1.0"
-  creator="pymavlink"
+  creator="plane_pymavlink"
   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xmlns="http://www.topografix.com/GPX/1/0"
   xsi:schemaLocation="http://www.topografix.com/GPX/1/0 http://www.topografix.com/GPX/1/0/gpx.xsd">

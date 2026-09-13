@@ -3,7 +3,7 @@
 this shows how to add a new message to a bin log
 '''
 
-from pymavlink import DFReader
+from plane_pymavlink import DFReader
 
 import argparse
 parser = argparse.ArgumentParser("add msg example")

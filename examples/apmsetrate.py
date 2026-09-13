@@ -19,7 +19,7 @@ parser.add_argument("--showmessages", action='store_true',
                   help="show incoming messages", default=False)
 args = parser.parse_args()
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 
 def wait_heartbeat(m):
     '''wait for a heartbeat so we know the target system IDs'''

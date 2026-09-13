@@ -9,7 +9,7 @@ via a local TCP connection.
 @author: Matthew Lloyd (github@matthewlloyd.net)
 """
 
-from pymavlink import mavutil
+from plane_pymavlink import mavutil
 from argparse import ArgumentParser
 import socket
 
