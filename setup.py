@@ -82,6 +82,9 @@ def generate_content():
 
         for xml in v10_dialects:
             dialect = os.path.basename(xml)[:-4]
+            wildcard = os.getenv("MAVLINK_DIALECT",'*')
+            if not fnmatch.fnmatch(dialect, wildcard):
+                continue
             print("Building %s for protocol 1.0" % xml)
             if not mavgen.mavgen_python_dialect(dialect, mavparse.PROTOCOL_1_0):
                 print("Building failed %s for protocol 1.0" % xml)
@@ -89,6 +92,9 @@ def generate_content():
 
         for xml in v20_dialects:
             dialect = os.path.basename(xml)[:-4]
+            wildcard = os.getenv("MAVLINK_DIALECT",'*')
+            if not fnmatch.fnmatch(dialect, wildcard):
+                continue
             print("Building %s for protocol 2.0" % xml)
             if not mavgen.mavgen_python_dialect(dialect, mavparse.PROTOCOL_2_0):
                 print("Building failed %s for protocol 2.0" % xml)
@@ -163,10 +169,12 @@ setup (name = 'plane_pymavlink',
                     'Intended Audience :: Science/Research',
                     'License :: OSI Approved :: GNU Lesser General Public License v3 (LGPLv3)',
                     'Operating System :: OS Independent',
-                    'Programming Language :: Python :: 3.6',
-                    'Programming Language :: Python :: 3.7',
-                    'Programming Language :: Python :: 3.8',
                     'Programming Language :: Python :: 3.9',
+                    'Programming Language :: Python :: 3.10',
+                    'Programming Language :: Python :: 3.11',
+                    'Programming Language :: Python :: 3.12',
+                    'Programming Language :: Python :: 3.13',
+                    'Programming Language :: Python :: 3.14',
                     'Topic :: Scientific/Engineering',
                     ],
        license='LGPLv3',
@@ -191,6 +199,7 @@ setup (name = 'plane_pymavlink',
                    'plane_pymavlink.dialects.v10',
                    'plane_pymavlink.dialects.v20',
                    'plane_pymavlink.dfindexer',
+                   'plane_pymavlink.tools',
                    ],
        scripts = [ 'tools/magfit_delta.py', 'tools/mavextract.py',
                    'tools/mavgraph.py', 'tools/mavparmdiff.py',
@@ -211,12 +220,12 @@ setup (name = 'plane_pymavlink',
                    'tools/mavsummarize.py',
                    'tools/mavlink_bitmask_decoder.py',
                    'tools/magfit_WMM.py',
+                   'tools/mavbitmask_change.py',
+                   'tools/mavsensor_status_change.py',
        ],
        install_requires=[
             'lxml',
             'fastcrc',
-            # importlib.resources.files() requires Python 3.9+; use backport for older versions
-            'importlib_resources; python_version < "3.9"',
        ],
        ext_modules=ext_modules,
        cmdclass={'build_py': custom_build_py},
