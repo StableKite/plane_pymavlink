@@ -6,7 +6,7 @@ MAVLink File Transfer Protocol support - https://mavlink.io/en/services/ftp.html
 
 Original from MAVProxy/MAVProxy/modules/mavproxy_ftp.py.
 
-SPDX-FileCopyrightText: 2011-2024 Andrew Tridgell, 2024-2025 Amilcar Lucas
+SPDX-FileCopyrightText: 2011-2024 Andrew Tridgell, 2024-2026 Amilcar Lucas
 
 SPDX-License-Identifier: GPL-3.0-or-later
 """
@@ -14,7 +14,9 @@ SPDX-License-Identifier: GPL-3.0-or-later
 # FLAKE_CLEAN
 
 import logging
+import math
 import os
+import tempfile
 import random
 import struct
 import sys
@@ -68,6 +70,8 @@ from plane_pymavlink.mavftp_op import (
     OP_WriteFile,
 )
 
+ParameterDataType = Union[str, int]
+
 
 # pylint: disable=invalid-name
 class FtpError(IntEnum):
@@ -98,6 +102,8 @@ class FtpError(IntEnum):
 
 HDR_Len = 12
 MAX_Payload = 239
+BURST_REPLY_SEQUENCE_WINDOW = 4096
+MAX_READ_GAPS = 4096
 # pylint: enable=invalid-name
 
 
@@ -335,12 +341,18 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.fh: Union[None, SIO, BufferedReader, BufferedWriter, BufferedRandom] = None
         self.filename: Union[None, str] = None
         self.callback = None
+        self.callback_failure: Optional[MAVFTPReturn] = None
         self.callback_progress = None
         self.put_callback = None
         self.put_callback_progress = None
         self.total_size = 0
         self.read_gaps: List[Tuple[int, int]] = []
         self.read_gap_times: Dict[Tuple[int, int], float] = {}
+        # FTP permits several ReadFile requests in flight. Track their
+        # expected response sequences so delayed replies from a prior request
+        # cannot be dispatched as a current gap repair.
+        self.pending_read_replies: Dict[int, Tuple[int, int]] = {}
+        self.pending_read_requests: Dict[int, FTP_OP] = {}
         self.last_gap_send = 0.0
         self.read_retries = 0
         self.read_total = 0
@@ -348,12 +360,30 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.duplicates = 0
         self.last_read = None
         self.last_burst_read: Union[None, float] = None
+        # The start offset and first expected reply sequence of the active burst.
+        # Burst packets are streamed with advancing sequence numbers, so both
+        # identify whether a reply belongs to the current burst.
+        self.pending_burst_offset: Optional[int] = None
+        self.pending_burst_seq: Optional[int] = None
+        self.pending_burst_retry = False
+        self.pending_burst_request: Optional[FTP_OP] = None
         self.op_start: Union[None, float] = None
         self.dir_offset = 0
         self.last_op_time = time.time()
         self.last_send_time = time.time()
         self.rtt = 0.5
         self.reached_eof = False
+        self.read_complete = False
+        # Explicit terminal reply, identified by (request opcode, reply
+        # sequence). A boolean here lets a delayed reply from an earlier
+        # operation complete whichever command is currently waiting.
+        self.completed_reply: Optional[Tuple[int, int]] = None
+        # sequence numbers of in-flight terminate/reset requests, None
+        # when nothing is outstanding: replies are correlated by
+        # sequence so a stale or duplicated reply from an earlier
+        # request cannot mark the current one complete
+        self.pending_terminate_seq = None
+        self.pending_reset_seq = None
         self.backlog = 0
         self.burst_size: int = int(self.ftp_settings.burst_read_size)
         self.write_list: Union[None, Set[int]] = None
@@ -364,13 +394,27 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.write_idx = 0
         self.write_recv_idx = -1
         self.write_pending = 0
+        # Uploads have several WriteFile requests in flight. Map each
+        # response sequence to its requested offset.
+        self.pending_write_replies: Dict[int, int] = {}
+        self.pending_write_requests: Dict[int, FTP_OP] = {}
         self.write_last_send: Union[None, float] = None
         self.open_retries = 0
         self.list_result: List[DirectoryEntry] = []
         self.list_temp_result: List[DirectoryEntry] = []
         self.requested_size: int = 0
         self.requested_offset: int = 0
-        self.temp_filename = "/tmp/temp_mavftp_file"
+        # The synchronous read/read_sector API returns data to its caller and
+        # must never publish a file named after the remote path.
+        self.read_to_memory = False
+        # set per-download by __handle_open_ro_reply: a securely
+        # created unique staging file, so concurrent MAVFTP clients on
+        # one host (e.g. parallel simulator test runners) cannot share
+        # a staging file and its name is not predictable
+        self.temp_filename = None
+        # only close file handles this instance opened itself; cmd_put
+        # stores a caller-owned handle in self.fh
+        self.fh_owned = False
 
         self.master = master
         self.target_system = target_system
@@ -379,6 +423,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.done = False
 
         # Reset the flight controller FTP state-machine
+        self.pending_reset_seq = self.seq
         self.__send(FTP_OP(self.seq, self.session, OP_ResetSessions, 0, 0, 0, 0, None))
         self.process_ftp_reply("ResetSessions")
 
@@ -415,9 +460,10 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         logging.error(usage)
         return MAVFTPReturn("FTP command", FtpError.InvalidArguments)
 
-    def __send(self, op: FTP_OP) -> None:
-        """Send a request."""
-        op.seq = self.seq
+    def __send(self, op: FTP_OP, retry: bool = False) -> None:
+        """Send a request, preserving its sequence number on retransmission."""
+        if not retry:
+            op.seq = self.seq
         payload = op.pack()
         plen = len(payload)
         if plen < MAX_Payload + HDR_Len:
@@ -425,7 +471,20 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.master.mav.file_transfer_protocol_send(
             self.network, self.target_system, self.target_component, payload
         )
-        self.seq = (self.seq + 1) % 256
+        expected_reply_seq = (op.seq + 1) % 65536
+        if op.opcode == OP_BurstReadFile:
+            self.pending_burst_offset = op.offset
+            self.pending_burst_seq = expected_reply_seq
+            self.pending_burst_retry = retry
+            self.pending_burst_request = op
+        elif op.opcode == OP_ReadFile:
+            self.pending_read_replies[expected_reply_seq] = (op.offset, op.size)
+            self.pending_read_requests[expected_reply_seq] = op
+        elif op.opcode == OP_WriteFile:
+            self.pending_write_replies[expected_reply_seq] = op.offset
+            self.pending_write_requests[expected_reply_seq] = op
+        if not retry:
+            self.seq = (self.seq + 1) % 65536
         self.last_op = op
         now = time.time()
         if self.ftp_settings.debug > 1:
@@ -433,13 +492,32 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.last_op_time = time.time()
         self.last_send_time = now
 
+    def __release_staging(self) -> None:
+        """Close and remove this instance's own staging resources.
+        Caller-owned handles (cmd_put's fh argument) are left alone."""
+        if self.fh is not None and self.fh_owned:
+            try:
+                self.fh.close()
+            except OSError:
+                pass
+        self.fh_owned = False
+        if self.temp_filename is not None:
+            try:
+                os.unlink(self.temp_filename)
+            except OSError:
+                pass
+            self.temp_filename = None
+
     def __terminate_session(self) -> None:
         """Terminate current session."""
+        self.pending_terminate_seq = self.seq
         self.__send(
             FTP_OP(self.seq, self.session, OP_TerminateSession, 0, 0, 0, 0, None)
         )
+        self.__release_staging()
         self.fh = None
         self.filename = None
+        self.read_to_memory = False
         self.write_list = None
         if self.callback is not None:
             # tell caller that the transfer failed
@@ -458,15 +536,39 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.read_gaps = []
         self.read_total = 0
         self.read_gap_times = {}
+        self.pending_read_replies = {}
+        self.pending_read_requests = {}
         self.last_read = None
         self.last_burst_read = None
+        self.pending_burst_offset = None
+        self.pending_burst_seq = None
+        self.pending_burst_request = None
         self.reached_eof = False
         self.backlog = 0
         self.duplicates = 0
+        self.pending_write_replies = {}
+        self.pending_write_requests = {}
         if self.ftp_settings.debug > 0:
             logging.info("FTP: Terminated session")
         self.process_ftp_reply("TerminateSession")
         self.session = (self.session + 1) % 256
+
+    def __has_active_session(self) -> bool:
+        """Return whether a file operation may have opened a remote session."""
+        if self.fh is not None or self.write_list is not None:
+            return True
+        return (
+            self.filename is not None
+            and self.last_op is not None
+            and self.last_op.opcode
+            in {
+                OP_OpenFileRO,
+                OP_BurstReadFile,
+                OP_ReadFile,
+                OP_CreateFile,
+                OP_WriteFile,
+            }
+        )
 
     def cmd_list(self, args: List[str]) -> MAVFTPReturn:
         """List files."""
@@ -514,7 +616,11 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                         DirectoryEntry(name=dir_entry[1:], is_dir=True, size_b=0)
                     )
                 elif dir_entry[0] == "F":
-                    (name, size_str) = dir_entry[1:].split("\t")
+                    try:
+                        (name, size_str) = dir_entry[1:].rsplit("\t", 1)
+                    except ValueError:
+                        logging.error("Invalid file entry: %s", dir_entry)
+                        return MAVFTPReturn("ListDirectory", FtpError.InvalidDataSize)
                     try:
                         size = int(size_str)
                     except (ValueError, TypeError, OverflowError):
@@ -536,6 +642,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             and op.payload[0] == FtpError.EndOfFile
         ):
             self.list_result = self.list_temp_result
+            self.completed_reply = (op.req_opcode, op.seq)
             return MAVFTPReturn(
                 "ListDirectory", FtpError.Success, directory_listing=self.list_result
             )
@@ -553,6 +660,10 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.requested_offset = offset
         self.requested_size = size
         self.filename = path
+        self.read_to_memory = True
+        self.callback = None
+        self.callback_failure = None
+        self.callback_progress = None
         self.done = False
 
         logging.info(
@@ -591,13 +702,17 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 logging.error(e)
             self.__idle_task()
             time.sleep(0.0001)
-        logging.info("loop closed, gaps:%u, done: %u", self.read_gaps, self.done)
+        logging.info("loop closed, gaps:%u, done: %u", len(self.read_gaps), self.done)
+        if not self.done and self.__has_active_session():
+            self.__terminate_session()
         if len(self.read_gaps) == 0:
             return self.get_result
-        logging.error("closed read with %u gaps", self.read_gaps)
+        logging.error("closed read with %u gaps", len(self.read_gaps))
         return None
 
-    def cmd_set(self, args: List[str]) -> MAVFTPReturn:
+    def cmd_set(  # pylint: disable=too-many-return-statements,too-many-boolean-expressions
+        self, args: List[str]
+    ) -> MAVFTPReturn:
         """Set a MAVFTP configuration parameter."""
         if len(args) != 2:
             logging.error("Usage: set PARAMETERNAME PARAMETERVALUE")
@@ -612,8 +727,57 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
 
         try:
             setting_value = float(args[1])
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, OverflowError):
             logging.error("Invalid parameter value: %s", args[1])
+            return MAVFTPReturn("Set", FtpError.InvalidArguments)
+
+        setting = self.ftp_settings._vars[setting_name]  # pylint: disable=protected-access
+        if not math.isfinite(setting_value):
+            logging.error("Invalid parameter value: %s", args[1])
+            return MAVFTPReturn("Set", FtpError.InvalidArguments)
+        if setting.type is int:
+            if not setting_value.is_integer():
+                logging.error("Invalid integer parameter value: %s", args[1])
+                return MAVFTPReturn("Set", FtpError.InvalidArguments)
+            setting_value = int(setting_value)
+
+        bounded_settings = {
+            "debug": (0, 2),
+            "pkt_loss_tx": (0, 100),
+            "pkt_loss_rx": (0, 100),
+            "max_backlog": (1, None),
+            "burst_read_size": (1, MAX_Payload),
+            "write_size": (1, MAX_Payload),
+            "write_qsize": (1, None),
+            "read_retry_time": (0, None),
+            "retry_time": (0.1, None),
+        }
+        minimum, maximum = bounded_settings.get(setting_name, (None, None))
+        if (
+            (minimum is not None and setting_value <= minimum and setting_name == "retry_time")
+            or (minimum is not None and setting_value < minimum)
+            or (maximum is not None and setting_value > maximum)
+        ):
+            logging.error("Invalid value for %s: %s", setting_name, setting_value)
+            return MAVFTPReturn("Set", FtpError.InvalidArguments)
+
+        idle_detection_time = (
+            setting_value
+            if setting_name == "idle_detection_time"
+            else self.ftp_settings.idle_detection_time
+        )
+        read_retry_time = (
+            setting_value
+            if setting_name == "read_retry_time"
+            else self.ftp_settings.read_retry_time
+        )
+        if setting_name == "idle_detection_time" and setting_value <= 0:
+            logging.error("Invalid value for %s: %s", setting_name, setting_value)
+            return MAVFTPReturn("Set", FtpError.InvalidArguments)
+        if idle_detection_time <= read_retry_time:
+            logging.error(
+                "idle_detection_time must be greater than read_retry_time"
+            )
             return MAVFTPReturn("Set", FtpError.InvalidArguments)
 
         setattr(self.ftp_settings, setting_name, setting_value)
@@ -635,7 +799,11 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         if callback is None or self.ftp_settings.debug > 1:
             logging.info("Getting %s to %s", fname, self.filename)
         self.op_start = time.time()
+        self.read_to_memory = False
+        self.requested_offset = 0
+        self.requested_size = 0
         self.callback = callback
+        self.callback_failure = None
         self.callback_progress = progress_callback
         self.read_retries = 0
         self.duplicates = 0
@@ -657,23 +825,21 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         if op.opcode == OP_Ack:
             if self.filename is None:
                 return MAVFTPReturn("OpenFileRO", FtpError.FileNotFound)
+            self.session = op.session
             try:
-                if self.callback is not None or self.filename == "-":
+                if self.callback is not None or self.filename == "-" or self.read_to_memory:
                     self.fh = SIO()
                 else:
-                    self.fh = open(self.temp_filename, "wb+")  # noqa: SIM115 pylint: disable=consider-using-with
+                    self.__release_staging()
+                    (temp_fd, self.temp_filename) = tempfile.mkstemp(prefix="mavftp_")
+                    try:
+                        self.fh = os.fdopen(temp_fd, "wb+")
+                    except OSError:
+                        os.close(temp_fd)
+                        raise
+                    self.fh_owned = True
                     self.fh.truncate(0)
                     self.fh.seek(self.requested_offset)
-                    read = FTP_OP(
-                        self.seq,
-                        self.session,
-                        OP_BurstReadFile,
-                        self.burst_size,
-                        0,
-                        0,
-                        self.requested_offset,
-                        None,
-                    )
             except Exception as ex:  # pylint: disable=broad-except
                 logging.error(
                     "FTP: Failed to open local file %s: %s", self.filename, ex
@@ -689,11 +855,19 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 )
                 if self.ftp_settings.debug > 0:
                     logging.info("Remote file size: %u", self.remote_file_size)
-                self.requested_size = self.remote_file_size
+                if not self.read_to_memory:
+                    self.requested_size = self.remote_file_size
             else:
                 self.remote_file_size = 0
             read = FTP_OP(
-                self.seq, self.session, OP_BurstReadFile, self.burst_size, 0, 0, 0, None
+                self.seq,
+                self.session,
+                OP_BurstReadFile,
+                self.burst_size,
+                0,
+                0,
+                self.requested_offset if self.read_to_memory else 0,
+                None,
             )
             self.last_burst_read = time.time()
             self.__send(read)
@@ -705,22 +879,40 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.__terminate_session()
         return ret
 
-    def __check_read_finished(self) -> bool:
+    def __check_read_finished(self) -> bool:  # pylint: disable=too-many-branches
         """Check if download has completed."""
         if self.fh is None:
             return True
         if self.op_start is None:
             return True
         if len(self.read_gaps) == 0 and (
-            self.reached_eof or self.read_total >= self.requested_size
+            self.reached_eof or (self.read_to_memory and self.read_total >= self.requested_size)
         ):
-            ofs = self.fh.tell()
+            ofs = self.__read_position()
             dt = time.time() - self.op_start
             rate = (ofs / dt) / 1024.0
+            publish_result = True
             if self.callback is not None:
+                # The callback owns the downloaded data.  This is also used
+                # for virtual MAVFTP paths such as param.pck?withdefaults=1,
+                # which must never be treated as local filenames.
+                publish_result = False
                 self.fh.seek(0)
-                self.callback(self.fh)
-                self.callback = None
+                try:
+                    callback_result = self.callback(self.fh)
+                    if (
+                        isinstance(callback_result, MAVFTPReturn)
+                        and callback_result.error_code != FtpError.Success
+                    ):
+                        self.callback_failure = callback_result
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    logging.error("FTP: download callback failed: %s", exc)
+                    self.callback_failure = MAVFTPReturn("Get", FtpError.Fail)
+                finally:
+                    self.callback = None
+            elif self.read_to_memory:
+                publish_result = False
+                self.done = True
             elif self.filename == "-":
                 self.fh.seek(0)
             else:
@@ -743,9 +935,10 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             assert self.fh is not None  # noqa: S101
             self.fh.seek(0)
             result = self.fh.read()
-            self.get_result = result[
-                self.requested_offset : self.requested_offset + self.requested_size
-            ]
+            if self.read_to_memory:
+                self.get_result = result[: self.requested_size]
+            else:
+                self.get_result = result
             assert self.get_result is not None  # noqa: S101
             if len(self.get_result) < self.requested_size:
                 logging.warning(
@@ -753,23 +946,43 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 )
             logging.info("read %u bytes", len(self.get_result))
             self.fh.flush()
-            self.fh.close()
-            if self.filename:
-                # Move the result to the final location
-                logging.info("Moving %s to %s", self.temp_filename, self.filename)
-                with open(self.filename, "wb") as final_file:
-                    final_file.write(self.get_result)
-            self.__terminate_session()
+            try:
+                if publish_result and self.filename and self.filename != "-":
+                    # Move the result to the final location
+                    logging.info("Moving %s to %s", self.temp_filename, self.filename)
+                    with open(self.filename, "wb") as final_file:
+                        final_file.write(self.get_result)
+            finally:
+                # terminate the remote session and release the staging
+                # file even when the destination cannot be written
+                self.__terminate_session()
+                self.read_complete = True
             return True
         return False
 
     def __write_payload(self, op: FTP_OP) -> None:
         """Write payload from a read op."""
-        self.fh.seek(op.offset)
+        write_offset = op.offset
+        if self.read_to_memory:
+            write_offset -= self.requested_offset
+        self.fh.seek(write_offset)
         self.fh.write(op.payload)
         self.read_total += len(op.payload)
         if self.callback_progress is not None and self.remote_file_size:
             self.callback_progress(self.read_total / self.remote_file_size)
+
+    def __read_position(self) -> int:
+        """Return the current remote offset represented by the read buffer."""
+        position = self.fh.tell()
+        if self.read_to_memory:
+            position += self.requested_offset
+        return position
+
+    def __seek_read_position(self, offset: int) -> None:
+        """Seek the read buffer to a remote offset."""
+        if self.read_to_memory:
+            offset -= self.requested_offset
+        self.fh.seek(offset)
 
     def __handle_burst_read(self, op: FTP_OP, _m) -> MAVFTPReturn:  # noqa: PLR0911, PLR0915 pylint: disable=too-many-statements,too-many-branches,too-many-return-statements
         """Handle OP_BurstReadFile reply."""
@@ -795,7 +1008,28 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             if self.ftp_settings.debug > 0:
                 logging.info("FTP: Setting burst size to %u", self.burst_size)
         if op.opcode == OP_Ack and self.fh is not None:
-            ofs = self.fh.tell()
+            # A retried request must see its first expected reply before a
+            # delayed packet can affect its sequence floor.  Other packets
+            # still reach the writer: their offsets can preserve useful data
+            # and create gaps for normal repair.
+            expected_retry_reply = (
+                self.pending_burst_seq is not None
+                and op.seq == self.pending_burst_seq
+            )
+            if not self.pending_burst_retry or expected_retry_reply:
+                self.pending_burst_retry = False
+            if (
+                self.pending_burst_seq is not None
+                and self.pending_burst_offset is not None
+            ):
+                sequence_distance = (op.seq - self.pending_burst_seq) & 0xFFFF
+                offset_distance = op.offset - self.pending_burst_offset
+                # A stream cannot advance its sequence more times than bytes
+                # since its requested offset.  Do not let a delayed reply
+                # with an implausibly distant sequence ratchet the floor.
+                if BURST_REPLY_SEQUENCE_WINDOW < sequence_distance <= offset_distance:
+                    self.pending_burst_seq = (self.pending_burst_seq + 1) & 0xFFFF
+            ofs = self.__read_position()
             if op.offset < ofs:
                 # writing an earlier portion, possibly remove a gap
                 gap = (op.offset, len(op.payload))
@@ -815,18 +1049,26 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                             "FTP: dup read reply at %u of len %u ofs=%u",
                             op.offset,
                             op.size,
-                            self.fh.tell(),
+                            self.__read_position(),
                         )
                     self.duplicates += 1
                     return MAVFTPReturn("BurstReadFile", FtpError.Fail)
                 self.__write_payload(op)
-                self.fh.seek(ofs)
+                self.__seek_read_position(ofs)
                 if self.__check_read_finished():
                     return MAVFTPReturn("BurstReadFile", FtpError.Success)
             elif op.offset > ofs:
                 # we have a gap
                 gap = (ofs, op.offset - ofs)
                 max_read = self.burst_size
+                gap_count = (gap[1] + max_read - 1) // max_read
+                total_gap_count = len(self.read_gaps) + gap_count
+                if total_gap_count > MAX_READ_GAPS:
+                    logging.error(
+                        "FTP: burst reply creates too many gaps (%u)", total_gap_count
+                    )
+                    self.__terminate_session()
+                    return MAVFTPReturn("BurstReadFile", FtpError.InvalidDataSize)
                 while True:
                     if gap[1] <= max_read:
                         self.read_gaps.append(gap)
@@ -839,6 +1081,20 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 self.__write_payload(op)
             else:
                 self.__write_payload(op)
+            # Burst replies have their own advancing sequence stream.  Keep
+            # future requests beyond every accepted reply so a new download
+            # cannot reuse a stale reply sequence when a server reuses a
+            # session identifier.
+            if (
+                self.pending_burst_seq is not None
+                and self.pending_burst_offset is not None
+                and ((op.seq - self.pending_burst_seq) & 0xFFFF)
+                <= (op.offset - self.pending_burst_offset)
+                and self.__seq_is_at_or_after(op.seq, self.seq)
+            ):
+                self.seq = (op.seq + 1) & 0xFFFF
+            if self.__check_read_finished():
+                return MAVFTPReturn("BurstReadFile", FtpError.Success)
             if op.burst_complete:
                 if op.size > 0 and op.size < self.burst_size:
                     # a burst complete with non-zero size and less than burst packet size
@@ -850,34 +1106,38 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                     ):
                         logging.info(
                             "FTP: EOF at %u with %u gaps t=%.2f",
-                            self.fh.tell(),
+                            self.__read_position(),
                             len(self.read_gaps),
                             time.time() - self.op_start,
                         )
                     self.reached_eof = True
+                    self.pending_burst_offset = None
+                    self.pending_burst_seq = None
+                    self.pending_burst_request = None
                     if self.__check_read_finished():
                         return MAVFTPReturn("BurstReadFile", FtpError.Success)
                     self.__check_read_send()
                     return MAVFTPReturn("BurstReadFile", FtpError.Success)
-                more = self.last_op
+                more = self.pending_burst_request
+                if more is None:
+                    return MAVFTPReturn("BurstReadFile", FtpError.Fail)
                 more.offset = op.offset + op.size
                 if self.ftp_settings.debug > 0:
                     logging.info(
-                        "FTP: burst continue at %u %u", more.offset, self.fh.tell()
+                        "FTP: burst continue at %u %u", more.offset, self.__read_position()
                     )
                 self.__send(more)
-        elif op.opcode == OP_Nack:
-            ecode = (
-                FtpError(op.payload[0])
-                if op.payload is not None
-                else FtpError.NoErrorCodeInNack
-            )
-            if ecode in (FtpError.EndOfFile, 0):
-                if not self.reached_eof and op.offset > self.fh.tell():
+            # A valid burst reply may be only one part of the transfer.
+            # It is successful even when it does not complete the read.
+            return MAVFTPReturn("BurstReadFile", FtpError.Success)
+        if op.opcode == OP_Nack:
+            nack_result = self.__decode_ftp_ack_and_nack(op)
+            if nack_result.error_code == FtpError.EndOfFile:
+                if not self.reached_eof and op.offset > self.__read_position():
                     # we lost the last part of the burst
                     if self.ftp_settings.debug > 0:
                         logging.error(
-                            "FTP: burst lost EOF %u %u", self.fh.tell(), op.offset
+                            "FTP: burst lost EOF %u %u", self.__read_position(), op.offset
                         )
                     return MAVFTPReturn("BurstReadFile", FtpError.Fail)
                 if (
@@ -887,26 +1147,29 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 ):
                     logging.info(
                         "FTP: EOF at %u with %u gaps t=%.2f",
-                        self.fh.tell(),
+                        self.__read_position(),
                         len(self.read_gaps),
                         time.time() - self.op_start,
                     )
                 self.reached_eof = True
+                self.pending_burst_offset = None
+                self.pending_burst_seq = None
+                self.pending_burst_request = None
                 if self.__check_read_finished():
                     return MAVFTPReturn("BurstReadFile", FtpError.Success)
                 self.__check_read_send()
-            elif self.ftp_settings.debug > 0:
-                logging.info("FTP: burst Nack (ecode:%u): %s", ecode, op)
                 return MAVFTPReturn("BurstReadFile", FtpError.Fail)
             if self.ftp_settings.debug > 0:
                 logging.error("FTP: burst nack: %s", op)
-                return MAVFTPReturn("BurstReadFile", FtpError.Fail)
-        else:
-            logging.warning("FTP: burst error: %s", op)
+            self.__terminate_session()
+            return nack_result
+        logging.warning("FTP: burst error: %s", op)
         return MAVFTPReturn("BurstReadFile", FtpError.Fail)
 
     def __handle_reply_read(self, op: FTP_OP, _m) -> MAVFTPReturn:
         """Handle OP_ReadFile reply."""
+        self.pending_read_replies.pop(op.seq, None)
+        self.pending_read_requests.pop(op.seq, None)
         if self.fh is None or self.filename is None:
             if self.ftp_settings.debug > 0:
                 logging.warning("FTP: Unexpected read reply")
@@ -919,9 +1182,19 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             if gap in self.read_gaps:
                 self.read_gaps.remove(gap)
                 self.read_gap_times.pop(gap)
-                ofs = self.fh.tell()
+                self.pending_read_replies = {
+                    seq: pending_gap
+                    for seq, pending_gap in self.pending_read_replies.items()
+                    if pending_gap != gap
+                }
+                self.pending_read_requests = {
+                    seq: pending_read
+                    for seq, pending_read in self.pending_read_requests.items()
+                    if (pending_read.offset, pending_read.size) != gap
+                }
+                ofs = self.__read_position()
                 self.__write_payload(op)
-                self.fh.seek(ofs)
+                self.__seek_read_position(ofs)
                 if self.ftp_settings.debug > 0:
                     logging.info(
                         "FTP: removed gap %u, %u, %u",
@@ -934,6 +1207,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             elif op.size < self.burst_size:
                 logging.info("FTP: file size changed to %u", op.offset + op.size)
                 self.__terminate_session()
+                return MAVFTPReturn("ReadFile", FtpError.Fail)
             else:
                 self.duplicates += 1
                 if self.ftp_settings.debug > 0:
@@ -942,11 +1216,13 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             logging.info(
                 "FTP: Read failed with %u gaps %s", len(self.read_gaps), str(op)
             )
+            ret = self.__decode_ftp_ack_and_nack(op)
             self.__terminate_session()
+            return ret
         self.__check_read_send()
         return MAVFTPReturn("ReadFile", FtpError.Success)
 
-    def cmd_put(
+    def cmd_put(  # pylint: disable=too-many-return-statements,too-many-statements
         self, args: List[str], fh=None, callback=None, progress_callback=None
     ) -> MAVFTPReturn:
         """Put file."""
@@ -956,20 +1232,35 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         if self.write_list is not None:
             logging.error("FTP: put already in progress")
             return MAVFTPReturn("CreateFile", FtpError.PutAlreadyInProgress)
+        self.write_block_size = int(self.ftp_settings.write_size)
+        if not 1 <= self.write_block_size <= MAX_Payload:
+            logging.error("FTP: write_size must be between 1 and %u", MAX_Payload)
+            return MAVFTPReturn("CreateFile", FtpError.InvalidArguments)
+        if self.ftp_settings.write_qsize < 1:
+            logging.error("FTP: write_qsize must be at least 1")
+            return MAVFTPReturn("CreateFile", FtpError.InvalidArguments)
         fname = args[0]
+        if len(args) > 1:
+            filename = args[1]
+        else:
+            filename = os.path.basename(fname)
+        if filename.endswith("/"):
+            filename += os.path.basename(fname)
+        try:
+            enc_fname = bytearray(filename, "ascii")
+        except UnicodeEncodeError:
+            logging.error("Invalid remote file name: %s", filename)
+            return MAVFTPReturn("CreateFile", FtpError.InvalidArguments)
         self.fh = fh
+        self.fh_owned = False
         if self.fh is None:
             try:
                 self.fh = open(fname, "rb")  # noqa: SIM115 pylint: disable=consider-using-with
+                self.fh_owned = True
             except Exception as ex:  # pylint: disable=broad-exception-caught
                 logging.error("FTP: Failed to open %s: %s", fname, ex)
                 return MAVFTPReturn("CreateFile", FtpError.FailToOpenLocalFile)
-        if len(args) > 1:
-            self.filename = args[1]
-        else:
-            self.filename = os.path.basename(fname)
-        if self.filename.endswith("/"):
-            self.filename += os.path.basename(fname)
+        self.filename = filename
         if callback is None:
             logging.info("Putting %s to %s", fname, self.filename)
         self.fh.seek(0, 2)
@@ -977,7 +1268,6 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.fh.seek(0)
 
         # setup write list
-        self.write_block_size = int(self.ftp_settings.write_size)
         self.write_file_size = file_size
 
         write_blockcount = file_size // self.write_block_size
@@ -996,7 +1286,6 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.put_callback_progress = progress_callback
         self.read_retries = 0
         self.op_start = time.time()
-        enc_fname = bytearray(self.filename, "ascii")
         op = FTP_OP(
             self.seq, self.session, OP_CreateFile, len(enc_fname), 0, 0, 0, enc_fname
         )
@@ -1028,19 +1317,25 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             self.__terminate_session()
             return MAVFTPReturn("CreateFile", FtpError.FileNotFound)
         if op.opcode == OP_Ack:
-            self.__send_more_writes()
+            self.session = op.session
+            self.__send_more_writes(op)
         else:
             ret = self.__decode_ftp_ack_and_nack(op)
             self.__terminate_session()
             return ret
         return MAVFTPReturn("CreateFile", FtpError.Success)
 
-    def __send_more_writes(self) -> None:
+    def __send_more_writes(self, completed_reply: Optional[FTP_OP] = None) -> None:
         """Send some more writes."""
         if self.write_list is None or len(self.write_list) == 0:
             # all done
             self.__put_finished(self.write_file_size)
             self.__terminate_session()
+            if completed_reply is not None:
+                self.completed_reply = (
+                    completed_reply.req_opcode,
+                    completed_reply.seq,
+                )
             return
 
         now = time.time()
@@ -1059,32 +1354,57 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             while idx not in self.write_list:
                 idx = (idx + 1) % self.write_total
             ofs = idx * self.write_block_size
-            self.fh.seek(ofs)
-            data = self.fh.read(self.write_block_size)
-            write = FTP_OP(
-                self.seq,
-                self.session,
-                OP_WriteFile,
-                len(data),
-                0,
-                0,
-                ofs,
-                bytearray(data),
+            write = next(
+                (
+                    pending_write
+                    for pending_write in self.pending_write_requests.values()
+                    if pending_write.offset == ofs
+                ),
+                None,
             )
-            self.__send(write)
+            if write is None:
+                self.fh.seek(ofs)
+                data = self.fh.read(self.write_block_size)
+                write = FTP_OP(
+                    self.seq,
+                    self.session,
+                    OP_WriteFile,
+                    len(data),
+                    0,
+                    0,
+                    ofs,
+                    bytearray(data),
+                )
+                self.__send(write)
+            else:
+                self.__send(write, retry=True)
             self.write_idx = (idx + 1) % self.write_total
             self.write_pending += 1
             self.write_last_send = now
 
     def __handle_write_reply(self, op: FTP_OP, _m) -> MAVFTPReturn:
         """Handle OP_WriteFile reply."""
+        expected_offset = self.pending_write_replies.pop(op.seq, None)
+        self.pending_write_requests.pop(op.seq, None)
+        if expected_offset is not None:
+            self.pending_write_replies = {
+                seq: offset
+                for seq, offset in self.pending_write_replies.items()
+                if offset != expected_offset
+            }
+            self.pending_write_requests = {
+                seq: pending_write
+                for seq, pending_write in self.pending_write_requests.items()
+                if pending_write.offset != expected_offset
+            }
         if self.fh is None:
             self.__terminate_session()
             return MAVFTPReturn("WriteFile", FtpError.FileNotFound)
         if op.opcode != OP_Ack:
             logging.error("FTP: Write failed")
+            ret = self.__decode_ftp_ack_and_nack(op)
             self.__terminate_session()
-            return MAVFTPReturn("WriteFile", FtpError.FileProtected)
+            return ret
 
         # assume the FTP server processes the blocks sequentially. This means
         # when we receive an ack that any blocks between the last ack and this
@@ -1098,7 +1418,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         self.write_acks += 1
         if self.put_callback_progress:
             self.put_callback_progress(self.write_acks / float(self.write_total))
-        self.__send_more_writes()
+        self.__send_more_writes(op)
         return MAVFTPReturn("WriteFile", FtpError.Success)
 
     def cmd_rm(self, args: List[str]) -> MAVFTPReturn:
@@ -1245,6 +1565,34 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             seq, session, opcode, size, req_opcode, burst_complete, offset, payload
         )
 
+    def __reply_matches_active_request(self, op: FTP_OP) -> bool:
+        """Return whether a reply can safely be dispatched to the active operation."""
+        if op.req_opcode == OP_BurstReadFile:
+            return (
+                self.pending_burst_offset is not None
+                and self.pending_burst_seq is not None
+                and self.__seq_is_at_or_after(op.seq, self.pending_burst_seq)
+                and op.offset >= self.pending_burst_offset
+            )
+        if op.req_opcode == OP_ReadFile:
+            return op.seq in self.pending_read_replies
+        if op.req_opcode == OP_WriteFile:
+            return op.seq in self.pending_write_replies
+
+        if (
+            self.last_op is not None
+            and op.req_opcode == self.last_op.opcode
+            and op.seq == (self.last_op.seq + 1) % 65536
+        ):
+            return True
+
+        return False
+
+    @staticmethod
+    def __seq_is_at_or_after(seq: int, expected: int) -> bool:
+        """Return whether a uint16 sequence is equal to or newer than expected."""
+        return ((seq - expected) & 0xFFFF) < 0x8000
+
     def __mavlink_packet(self, m) -> MAVFTPReturn:  # noqa: PLR0911, PGH004, pylint: disable=too-many-branches, too-many-return-statements
         """Handle a mavlink packet."""
         operation_name = "mavlink_packet"
@@ -1269,7 +1617,11 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         dt = now - self.last_op_time
         if self.ftp_settings.debug > 1:
             logging.info("FTP: < %s dt=%.2f", op, dt)
-        if op.session != self.session:
+        allocated_session_reply = (
+            op.opcode == OP_Ack
+            and op.req_opcode in {OP_OpenFileRO, OP_CreateFile}
+        )
+        if op.session != self.session and not allocated_session_reply:
             if self.ftp_settings.debug > 0:
                 logging.warning(
                     "FTP: wrong session replied %u expected %u. Will discard message",
@@ -1286,9 +1638,15 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 logging.warning("FTP: dropping packet RX")
             return MAVFTPReturn(operation_name, FtpError.Fail)
 
+        if not self.__reply_matches_active_request(op):
+            if self.ftp_settings.debug > 0:
+                logging.warning("FTP: stale reply. Will discard message: %s", op)
+            return MAVFTPReturn(operation_name, FtpError.Fail)
+
         if (
-            op.req_opcode == self.last_op.opcode
-            and op.seq == (self.last_op.seq + 1) % 256
+            self.last_op is not None
+            and op.req_opcode == self.last_op.opcode
+            and op.seq == (self.last_op.seq + 1) % 65536
         ):
             self.rtt = max(min(self.rtt, dt), 0.01)
 
@@ -1301,6 +1659,14 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         if op.req_opcode == OP_ResetSessions:
             return self.__handle_reset_sessions_reply(op, m)
         if op.req_opcode in {OP_None, OP_TerminateSession}:
+            if (
+                op.req_opcode == OP_TerminateSession
+                and self.pending_terminate_seq is not None
+                and op.seq == (self.pending_terminate_seq + 1) % 65536
+            ):
+                # Ack or Nack (InvalidSession means it was already
+                # closed): the handshake has been answered
+                self.pending_terminate_seq = None
             return MAVFTPReturn(operation_name, FtpError.Success)  # ignore reply
         if op.req_opcode == OP_CreateFile:
             return self.__handle_create_file_reply(op, m)
@@ -1331,8 +1697,21 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 len(self.read_gaps),
                 self.backlog,
             )
-        read = FTP_OP(self.seq, self.session, OP_ReadFile, length, 0, 0, offset, None)
-        self.__send(read)
+        read = next(
+            (
+                pending_read
+                for pending_read in self.pending_read_requests.values()
+                if (pending_read.offset, pending_read.size) == g
+            ),
+            None,
+        )
+        if read is None:
+            read = FTP_OP(
+                self.seq, self.session, OP_ReadFile, length, 0, 0, offset, None
+            )
+            self.__send(read)
+        else:
+            self.__send(read, retry=True)
         self.read_gaps.remove(g)
         self.read_gaps.append(g)
         self.last_gap_send = time.time()
@@ -1390,13 +1769,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 return False  # Not idle yet
             if self.ftp_settings.debug > 0:
                 logging.info("FTP: retry open")
-            send_op = self.last_op
-            self.__send(
-                FTP_OP(self.seq, self.session, OP_TerminateSession, 0, 0, 0, 0, None)
-            )
-            self.session = (self.session + 1) % 256
-            send_op.session = self.session
-            self.__send(send_op)
+            self.__send(self.last_op, retry=True)
 
         if (
             len(self.read_gaps) == 0
@@ -1419,22 +1792,15 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             if self.ftp_settings.debug > 0:
                 logging.info(
                     "FTP: Retry read at %u rtt=%.2f dt=%.2f",
-                    self.fh.tell(),
+                    self.__read_position(),
                     self.rtt,
                     dt,
                 )
-            self.__send(
-                FTP_OP(
-                    self.seq,
-                    self.session,
-                    OP_BurstReadFile,
-                    self.burst_size,
-                    0,
-                    0,
-                    self.fh.tell(),
-                    None,
-                )
-            )
+            if self.pending_burst_request is not None:
+                # Resume at the current high-water mark while preserving the
+                # client's reply gate and re-arming the server's burst offset.
+                self.pending_burst_request.offset = self.__read_position()
+                self.__send(self.pending_burst_request, retry=True)
             self.read_retries += 1
 
         # see if we can fill gaps
@@ -1454,9 +1820,16 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
 
     def __handle_reset_sessions_reply(self, op: FTP_OP, _m) -> MAVFTPReturn:
         """Handle reset sessions reply."""
+        if (
+            self.pending_reset_seq is not None
+            and op.seq == (self.pending_reset_seq + 1) % 65536
+        ):
+            # Ack or Nack, the handshake has been answered; the decoded
+            # result below still reports a Nack to the caller
+            self.pending_reset_seq = None
         return self.__decode_ftp_ack_and_nack(op)
 
-    def process_ftp_reply(
+    def process_ftp_reply(  # pylint: disable=too-many-branches, too-many-locals
         self, operation_name: str, timeout: float = 5
     ) -> MAVFTPReturn:
         """Execute an FTP operation that requires processing a MAVLink response."""
@@ -1470,17 +1843,112 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             "recv_timeout must be < settings.retry_time"
         )  # noqa: S101
 
+        # A read operation reports its completion positively: EOF seen
+        # with no gaps outstanding (__check_read_finished).  Return as
+        # soon as the transfer and its session-terminate handshake are
+        # both done instead of waiting out idle_detection_time of link
+        # silence - on a fast or simulated link the quiet-period tail
+        # dwarfs the transfer itself.  The flag is only ever set while a
+        # reply-processing loop runs (this one, or read()'s own driver
+        # loop, which does not use this method), so clearing it here
+        # cannot lose a completion; idle detection remains the fallback for a lost
+        # terminate reply and for operations with no positive
+        # completion signal.
+        self.read_complete = False
+        self.completed_reply = None
         while True:  # an FTP operation can have multiple responses
             m = self.master.recv_match(
                 type=["FILE_TRANSFER_PROTOCOL"], timeout=recv_timeout
             )
             if m is not None:
                 if operation_name == "TerminateSession":
-                    # self.silently_discard_terminate_session_reply()
-                    ret = MAVFTPReturn(operation_name, FtpError.Success)
+                    # consume only the terminate reply itself: stale
+                    # replies from the aborted transfer must not reach
+                    # their handlers, which can re-enter
+                    # __terminate_session from this very wait
+                    op = self.__op_parse(m)
+                    if (
+                        m.target_system == self.master.source_system  # pylint: disable=too-many-boolean-expressions
+                        and m.target_component == self.master.source_component
+                        and op.session == self.session
+                        and op.req_opcode == OP_TerminateSession
+                        and self.pending_terminate_seq is not None
+                        and op.seq == (self.pending_terminate_seq + 1) % 65536
+                    ):
+                        self.pending_terminate_seq = None
+                        ret = MAVFTPReturn(operation_name, FtpError.Success)
                 else:
-                    ret = self.__mavlink_packet(m)
+                    # Keep a result from the latest request or an active
+                    # in-flight request. Packet handlers must still see
+                    # stale replies so they can maintain their own state,
+                    # but retaining a stale result would make idle fallback
+                    # return a previous operation's outcome.
+                    op = self.__op_parse(m)
+                    reply_matches_last_op = (
+                        self.last_op is not None
+                        and op.req_opcode == self.last_op.opcode
+                        and op.seq == (self.last_op.seq + 1) % 65536
+                        and op.session == self.session
+                    )
+                    reply_matches_active_request = (
+                        op.session == self.session
+                        and self.__reply_matches_active_request(op)
+                    )
+                    packet_ret = self.__mavlink_packet(m)
+                    # An upload's final CreateFile/WriteFile reply starts a
+                    # TerminateSession request before returning here.  Its
+                    # result is therefore valid even though last_op is now
+                    # the terminate request.
+                    completed_upload = (
+                        operation_name.lower() == "put"
+                        and self.completed_reply is not None
+                        and self.completed_reply[0]
+                        in {OP_CreateFile, OP_WriteFile}
+                    )
+                    if (
+                        reply_matches_last_op
+                        or completed_upload
+                        or reply_matches_active_request
+                    ):
+                        ret = packet_ret
+                if (
+                    self.callback_failure is not None
+                    and operation_name != "TerminateSession"
+                ):
+                    callback_failure = self.callback_failure
+                    self.callback_failure = None
+                    return callback_failure
+            # Completion is scoped to the terminal reply that produced it.
+            # This prevents a delayed ListDirectory EOF from completing a
+            # following RemoveFile or a subsequent list operation.
+            reply_complete = False
+            if self.completed_reply is not None and self.last_op is not None:
+                completed_opcode, completed_seq = self.completed_reply
+                reply_complete = (
+                    completed_opcode == self.last_op.opcode
+                    and completed_seq == (self.last_op.seq + 1) % 65536
+                )
+                # A completed upload sends TerminateSession immediately after
+                # its final CreateFile/WriteFile reply. It is explicitly
+                # scoped to the upload reply type, rather than being a global
+                # latch that any packet handler can set.
+                if (
+                    not reply_complete
+                    and completed_opcode in {OP_CreateFile, OP_WriteFile}
+                    and operation_name.lower() == "put"
+                ):
+                    reply_complete = True
+            if not reply_complete and self.pending_terminate_seq is None:
+                reply_complete = self.read_complete
+                if not reply_complete:
+                    reply_complete = operation_name == "TerminateSession"
+                if not reply_complete and operation_name == "ResetSessions":
+                    reply_complete = self.pending_reset_seq is None
+            if reply_complete:
+                break
             if self.__idle_task():
+                if self.last_burst_read is not None and not self.read_complete:
+                    ret = MAVFTPReturn(operation_name, FtpError.RemoteReplyTimeout)
                 break
             if timeout > 0 and time.time() - start_time > timeout:  # pylint: disable=chained-comparison
                 logging.error(
@@ -1488,6 +1956,12 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 )
                 ret = MAVFTPReturn(operation_name, FtpError.RemoteReplyTimeout)
                 break
+        if (
+            ret.error_code == FtpError.RemoteReplyTimeout
+            and operation_name != "TerminateSession"
+            and self.__has_active_session()
+        ):
+            self.__terminate_session()
         return ret
 
     def __decode_ftp_ack_and_nack(
@@ -1566,7 +2040,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
         )
 
     @staticmethod
-    def ftp_param_decode(data: bytes) -> Union[None, ParamData]:  # pylint: disable=too-many-locals
+    def ftp_param_decode(data: bytes) -> Union[None, ParamData]:  # pylint: disable=too-many-locals,too-many-statements,too-many-branches,too-many-return-statements
         """Decode parameter data, returning ParamData."""
         pdata = ParamData()
 
@@ -1577,9 +2051,16 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 "paramftp: Not enough data do decode, only %u bytes", len(data)
             )
             return None
-        magic2, _num_params, total_params = struct.unpack("<HHH", data[0:6])
+        magic2, num_params, total_params = struct.unpack("<HHH", data[0:6])
         if magic2 not in {magic, magic_defaults}:
             logging.error("paramftp: bad magic 0x%x expected 0x%x", magic2, magic)
+            return None
+        if num_params > total_params:
+            logging.error(
+                "paramftp: parameter count %u exceeds total count %u",
+                num_params,
+                total_params,
+            )
             return None
         with_defaults = magic2 == magic_defaults
         data = data[6:]
@@ -1601,6 +2082,9 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
 
             if len(data) == 0:
                 break
+            if len(data) < 2:
+                logging.error("paramftp: truncated parameter header")
+                return None
 
             ptype, plen = struct.unpack("<BB", data[0:2])
             flags = (ptype >> 4) & 0x0F
@@ -1616,10 +2100,31 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
 
             name_len = ((plen >> 4) & 0x0F) + 1
             common_len = plen & 0x0F
+            value_len = type_len + default_len
+            record_len = 2 + name_len + value_len
+            if len(data) < record_len:
+                logging.error("paramftp: truncated parameter record")
+                return None
+            if common_len > len(last_name):
+                logging.error(
+                    "paramftp: invalid shared parameter name prefix length %u",
+                    common_len,
+                )
+                return None
             name = last_name[0:common_len] + data[2 : 2 + name_len]
-            vdata = data[2 + name_len : 2 + name_len + type_len + default_len]
+            if len(name) > 16:
+                logging.error(
+                    "paramftp: parameter name is too long (%u bytes)", len(name)
+                )
+                return None
+            try:
+                name.decode("utf-8")
+            except UnicodeDecodeError:
+                logging.error("paramftp: parameter name is not valid UTF-8")
+                return None
+            vdata = data[2 + name_len : record_len]
             last_name = name
-            data = data[2 + name_len + type_len + default_len :]
+            data = data[record_len:]
             if with_defaults:
                 if has_default:
                     (
@@ -1637,8 +2142,8 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 pdata.add_param(name, v, ptype)
             count += 1
 
-        if count != total_params:
-            logging.error("paramftp: bad count %u should be %u", count, total_params)
+        if count != num_params:
+            logging.error("paramftp: bad count %u should be %u", count, num_params)
             return None
 
         return pdata
@@ -1646,7 +2151,7 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
     @staticmethod
     def missionplanner_sort(item: str) -> Tuple[str, ...]:
         """Sorts a parameter name according to the rules defined in the Mission Planner software."""
-        return Tuple(item.split("_"))
+        return tuple(item.split("_"))
 
     @staticmethod
     def extract_params(
@@ -1659,20 +2164,20 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 pdict[name.decode("utf-8")] = (value, ptype)
 
             if sort_type == "missionplanner":
-                pdict = Dict(
+                pdict = dict(
                     sorted(
                         pdict.items(), key=lambda x: MAVFTP.missionplanner_sort(x[0])
                     )
                 )  # sort alphabetically
             elif sort_type == "mavproxy":
-                pdict = Dict(sorted(pdict.items()))  # sort in ASCIIbetical order
+                pdict = dict(sorted(pdict.items()))  # sort in ASCIIbetical order
             elif sort_type == "none":
                 pass
         return pdict
 
     @staticmethod
     def save_params(
-        pdict: Dict[str, Tuple[float, str]],
+        pdict: Dict[str, Tuple[float, ParameterDataType]],
         filename: str,
         sort_type: str,
         add_datatype_comments: bool,
@@ -1683,10 +2188,10 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
             return
         with open(filename, "w", encoding="utf-8") as f:
             parameter_data_types = {
-                "1": "8-bit",
-                "2": "16-bit",
-                "3": "32-bit integer",
-                "4": "32-bit float",
+                1: "8-bit",
+                2: "16-bit",
+                3: "32-bit integer",
+                4: "32-bit float",
             }
             if add_timestamp_comment:
                 f.write(
@@ -1699,7 +2204,8 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                     f.write(f"{name:<16} {value:<8.6f}")
 
                 if add_datatype_comments:
-                    f.write(f"  # {parameter_data_types[datatype]}")
+                    datatype_id = int(datatype)
+                    f.write(f"  # {parameter_data_types[datatype_id]}")
                 f.write("\n")
         logging.info("Outputted %u parameters to %s", len(pdict), filename)
 
@@ -1721,10 +2227,11 @@ class MAVFTP:  # pylint: disable=too-many-instance-attributes
                 data = fh.read()
             except OSError as exp:
                 logging.error("FTP: Failed to read file param.pck: %s", exp)
-                sys.exit(1)
+                return MAVFTPReturn("GetParams", FtpError.Fail)
             pdata = MAVFTP.ftp_param_decode(data)
             if pdata is None:
-                sys.exit(1)
+                logging.error("FTP: Failed to decode parameter file param.pck")
+                return MAVFTPReturn("GetParams", FtpError.Fail)
 
             param_values = MAVFTP.extract_params(pdata.params, sort_type)
             param_defaults = MAVFTP.extract_params(pdata.defaults, sort_type)
@@ -2008,9 +2515,9 @@ def create_argument_parser() -> ArgumentParser:
         help="Current path of the file/directory.",
     )
     parser_rename.add_argument(
-        "new_remote_path",
+        "arg2",
         type=str,
-        metavar="arg2",
+        metavar="new_remote_path",
         help="New path for the file/directory.",
     )
 
@@ -2039,6 +2546,7 @@ def auto_detect_serial() -> List[mavutil.SerialPort]:
         "*Ardu*",
         "*PX4*",
         "*Hex_*",
+        "*ProfiCNC*",
         "*Holybro_*",
         "*mRo*",
         "*FMU*",
@@ -2046,6 +2554,7 @@ def auto_detect_serial() -> List[mavutil.SerialPort]:
         "*Serial*",
         "*CubePilot*",
         "*Qiotek*",
+        "*Matek*",
     ]
     serial_list: List[mavutil.SerialPort] = mavutil.auto_detect_serial(
         preferred_list=preferred_ports
@@ -2099,7 +2608,7 @@ def wait_heartbeat(m) -> None:
     logging.info("Waiting for flight controller heartbeat")
     m.wait_heartbeat(timeout=5)
     logging.info(
-        "Heartbeat from system %u, component %u", m.target_system, m.target_system
+        "Heartbeat from system %u, component %u", m.target_system, m.target_component
     )
 
 
@@ -2153,6 +2662,7 @@ def main() -> None:
     if args.command in {"get", "put", "getparams"}:
         ret = mav_ftp.process_ftp_reply(args.command, timeout=500)
 
+    exit_code = 1
     if isinstance(ret, str):
         logging.error(
             "Command returned: %s, but it should return a MAVFTPReturn instead", ret
@@ -2160,6 +2670,7 @@ def main() -> None:
     elif isinstance(ret, MAVFTPReturn):
         if ret.error_code or args.command in {"list"}:
             ret.display_message()
+        exit_code = 0 if ret.error_code == FtpError.Success else 1
     elif ret is None:
         logging.error(
             "Command returned: None, but it should return a MAVFTPReturn instead"
@@ -2170,6 +2681,7 @@ def main() -> None:
         )
 
     master.close()
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":
