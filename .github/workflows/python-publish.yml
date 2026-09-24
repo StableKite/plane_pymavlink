@@ -34,11 +34,11 @@ jobs:
 
           if ref in ("refs/heads/main", "refs/heads/master") or event in ("release", "workflow_dispatch"):
               machines = [
-                  ("linux", "ubuntu-latest", "auto64 auto32"),
+                  ("linux", "ubuntu-latest", "auto64"),
                   ("linux-arm", "ubuntu-24.04-arm", "auto"),
                   ("linux-riscv64", "ubuntu-latest", "riscv64"),
                   ("macos", "macos-latest", "arm64 x86_64 universal2"),
-                  ("windows", "windows-latest", "auto64 auto32"),
+                  ("windows", "windows-latest", "auto64"),
                   ("windows-arm", "windows-11-arm", "auto"),
               ]
               py_versions = ["3.9", "3.10", "3.11", "3.12", "3.13", "3.14"]
