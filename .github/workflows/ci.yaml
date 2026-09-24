@@ -712,7 +712,7 @@ jobs:
           platform = os.environ["EXPECTED_PLATFORM"]
           arch = os.environ["EXPECTED_ARCH"]
 
-          if not name.startswith("plane_pymavlink-2.4.52-cp314t-"):
+          if not name.startswith("plane_pymavlink-2.4.52-cp314-cp314t-"):
               raise SystemExit(f"Unexpected CPython/free-threaded tag: {name}")
           if platform not in name:
               raise SystemExit(
