@@ -303,11 +303,10 @@ jobs:
           print("MAVLink 2 trailing-zero truncation: verified")
           print("MAVLink v2 generation/import: OK")
           PY
-
-  build:
-    name: Build plane_pymavlink
+  windows-package:
+    name: Windows x86_64 / source package
     needs: validate
-    runs-on: ubuntu-24.04
+    runs-on: windows-latest
 
     steps:
       - name: Checkout
@@ -320,7 +319,7 @@ jobs:
         with:
           python-version: "3.14t"
 
-      - name: Install build tools
+      - name: Install Windows build tools
         run: >-
           python -m pip install --upgrade
           build
@@ -328,363 +327,448 @@ jobs:
           wheel
           cython
           lxml
+          twine
 
-      - name: Build wheel and source distribution
-        shell: bash
+      - name: Build universal Windows wheel and source distribution
+        shell: pwsh
         env:
           PYMAVLINK_FAST_INDEX: "0"
-          MDEF: ${{ github.workspace }}/message_definitions
         run: |
-          set -euo pipefail
-          python -m build \
-            --no-isolation \
-            --wheel \
-            --sdist \
-            --outdir dist
+          $ErrorActionPreference = "Stop"
+          Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+          python -m build --no-isolation --wheel --sdist --outdir dist
+          if ($LASTEXITCODE -ne 0) { throw "Windows source build failed." }
 
-      - name: Verify distributions
-        shell: bash
+      - name: Verify Windows-built distributions
+        shell: python
         run: |
-          python - <<'PY'
           from email.parser import BytesParser
           from email.policy import default
           from pathlib import Path
           import tarfile
           import zipfile
 
+          version = "2.4.52"
           dist = Path("dist")
           wheels = list(dist.glob("*.whl"))
           sdists = list(dist.glob("*.tar.gz"))
 
           if len(wheels) != 1:
-              raise SystemExit(f"Expected exactly one wheel, got {wheels}")
+              raise SystemExit(f"Expected one Windows wheel, got {wheels}")
           if len(sdists) != 1:
-              raise SystemExit(f"Expected exactly one sdist, got {sdists}")
+              raise SystemExit(f"Expected one sdist, got {sdists}")
 
           wheel = wheels[0]
           sdist = sdists[0]
 
-          if not wheel.name.startswith("plane_pymavlink-"):
-              raise SystemExit(f"Unexpected wheel name: {wheel.name}")
-          if not wheel.name.endswith("-py3-none-any.whl"):
+          expected_wheel = f"plane_pymavlink-{version}-py3-none-any.whl"
+          expected_sdist = f"plane_pymavlink-{version}.tar.gz"
+
+          if wheel.name != expected_wheel:
               raise SystemExit(
-                  "PYMAVLINK_FAST_INDEX=0 should produce a pure-Python wheel: "
-                  + wheel.name
+                  f"Expected universal Windows wheel {expected_wheel}, got {wheel.name}"
+              )
+          if sdist.name != expected_sdist:
+              raise SystemExit(
+                  f"Expected sdist {expected_sdist}, got {sdist.name}"
               )
 
           with zipfile.ZipFile(wheel) as archive:
-              bad_member = archive.testzip()
-              if bad_member is not None:
-                  raise SystemExit(f"Corrupt wheel member: {bad_member}")
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Corrupt wheel member: {bad}")
 
               names = set(archive.namelist())
-
               required = {
                   "plane_pymavlink/__init__.py",
                   "plane_pymavlink/generator/mavcrc.py",
                   "plane_pymavlink/dialects/v20/common.py",
+                  "plane_pymavlink/dfindexer/__init__.py",
               }
               missing = sorted(required - names)
               if missing:
                   raise SystemExit(f"Wheel is missing {missing}")
 
-              if any(name.startswith("pymavlink/") for name in names):
+              native = [
+                  name for name in names
+                  if name.startswith("plane_pymavlink/dfindexer/")
+                  and name.lower().endswith((".pyd", ".so", ".dll"))
+              ]
+              if native:
                   raise SystemExit(
-                      "Wheel unexpectedly exposes old pymavlink namespace"
+                      f"Windows universal wheel unexpectedly has native extension: {native}"
                   )
 
-              generated = archive.read(
-                  "plane_pymavlink/dialects/v20/common.py"
-              ).decode("utf-8")
-
-              for marker in (
-                  "MAVLink_plane_target_bbox_message",
-                  "MAVLink_plane_target_id_message",
-                  "MAVLink_plane_no_target_message",
-              ):
-                  if marker not in generated:
-                      raise SystemExit(
-                          f"Generated common.py is missing {marker!r}"
-                      )
-
               metadata_name = next(
-                  name
-                  for name in names
+                  name for name in names
                   if name.endswith(".dist-info/METADATA")
               )
-              metadata = BytesParser(
-                  policy=default,
-              ).parsebytes(
+              metadata = BytesParser(policy=default).parsebytes(
                   archive.read(metadata_name)
               )
 
+          if metadata["Version"] != version:
+              raise SystemExit(
+                  f"Wheel metadata version mismatch: {metadata['Version']}"
+              )
           if metadata["Name"].lower().replace("-", "_") != "plane_pymavlink":
               raise SystemExit(
-                  f"Unexpected distribution name: {metadata['Name']!r}"
+                  f"Unexpected distribution name: {metadata['Name']}"
               )
 
-          version = metadata["Version"]
-          if not version:
-              raise SystemExit("Package version is empty")
-
           with tarfile.open(sdist, "r:gz") as archive:
-              sdist_names = archive.getnames()
-              required_suffixes = (
+              names = archive.getnames()
+              for suffix in (
                   "/setup.py",
                   "/pyproject.toml",
                   "/MANIFEST.in",
                   "/message_definitions/v1.0/common.xml",
                   "/generator/mavschema.xsd",
-              )
-              for suffix in required_suffixes:
-                  if not any(name.endswith(suffix) for name in sdist_names):
-                      raise SystemExit(
-                          f"Source distribution is missing {suffix}"
-                      )
+                  "/dfindexer/dfindexer_cy.pyx",
+                  "/dfindexer/dfindexer.c",
+              ):
+                  if not any(name.endswith(suffix) for name in names):
+                      raise SystemExit(f"Sdist is missing {suffix}")
 
-          print("Wheel:", wheel.name)
+          print("Windows wheel:", wheel.name)
           print("Sdist:", sdist.name)
-          print("Version:", version)
-          PY
+          print("Windows packaging structure: OK")
 
-      - name: Rebuild wheel from source distribution
-        shell: bash
+      - name: Twine-check Windows-built distributions
+        shell: pwsh
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = "Stop"
+          python -m twine check .\dist\*
+          if ($LASTEXITCODE -ne 0) { throw "twine check failed." }
 
-          rm -rf sdist-check rebuilt-wheel
-          mkdir -p sdist-check rebuilt-wheel
+      - name: Extract source distribution
+        id: sdist
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          import shutil
+          import tarfile
 
-          mapfile -t sdists < <(
-            find dist -maxdepth 1 -type f -name '*.tar.gz' -print
-          )
+          sdists = list(Path("dist").glob("*.tar.gz"))
+          if len(sdists) != 1:
+              raise SystemExit(f"Expected one sdist, got {sdists}")
 
-          if [ "${#sdists[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one sdist."
-            exit 1
-          fi
+          target = Path("sdist-check")
+          if target.exists():
+              shutil.rmtree(target)
+          target.mkdir()
 
-          tar -xzf "${sdists[0]}" -C sdist-check
+          with tarfile.open(sdists[0], "r:gz") as archive:
+              archive.extractall(target)
 
-          mapfile -t roots < <(
-            find sdist-check -mindepth 1 -maxdepth 1 -type d -print
-          )
+          roots = [path for path in target.iterdir() if path.is_dir()]
+          if len(roots) != 1:
+              raise SystemExit(f"Expected one sdist root, got {roots}")
 
-          if [ "${#roots[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one extracted sdist root."
-            exit 1
-          fi
+          root = roots[0].resolve()
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"root={root}\n")
 
-          (
-            cd "${roots[0]}"
-            export PYMAVLINK_FAST_INDEX=0
-            export MDEF="$PWD/message_definitions"
+          print("Sdist root:", root)
 
-            python -m build \
-              --no-isolation \
-              --wheel \
-              --outdir "$GITHUB_WORKSPACE/rebuilt-wheel"
-          )
+      - name: Rebuild universal wheel from Windows-built sdist
+        shell: pwsh
+        env:
+          PYMAVLINK_FAST_INDEX: "0"
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item -Recurse -Force rebuilt-wheel -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path rebuilt-wheel | Out-Null
 
-          python - <<'PY'
+          python -m build `
+            --no-isolation `
+            --wheel `
+            --outdir rebuilt-wheel `
+            "${{ steps.sdist.outputs.root }}"
+
+          if ($LASTEXITCODE -ne 0) {
+              throw "Windows rebuild from sdist failed."
+          }
+
+      - name: Verify rebuilt Windows wheel
+        shell: python
+        run: |
           from pathlib import Path
           import zipfile
 
           wheels = list(Path("rebuilt-wheel").glob("*.whl"))
           if len(wheels) != 1:
-              raise SystemExit(
-                  f"Expected exactly one rebuilt wheel, got {wheels}"
-              )
+              raise SystemExit(f"Expected one rebuilt wheel, got {wheels}")
 
           wheel = wheels[0]
-          if not wheel.name.endswith("-py3-none-any.whl"):
+          if wheel.name != "plane_pymavlink-2.4.52-py3-none-any.whl":
               raise SystemExit(f"Unexpected rebuilt wheel: {wheel.name}")
 
           with zipfile.ZipFile(wheel) as archive:
               names = set(archive.namelist())
-              if "plane_pymavlink/dialects/v20/common.py" not in names:
+              native = [
+                  name for name in names
+                  if name.startswith("plane_pymavlink/dfindexer/")
+                  and name.lower().endswith((".pyd", ".so", ".dll"))
+              ]
+              if native:
                   raise SystemExit(
-                      "Rebuilt wheel is missing Plane common dialect"
-                  )
-              if any(name.startswith("pymavlink/") for name in names):
-                  raise SystemExit(
-                      "Rebuilt wheel exposes old pymavlink namespace"
+                      f"Rebuilt Windows wheel unexpectedly has native extension: {native}"
                   )
 
           print("Rebuilt from sdist:", wheel.name)
-          PY
 
-      - name: Upload distributions
-        uses: actions/upload-artifact@v7
-        with:
-          name: distributions
-          path: |
-            dist/*.whl
-            dist/*.tar.gz
-          if-no-files-found: error
-
-  test:
-    name: Test / ${{ matrix.target }}
-    needs: build
-
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: Linux x86_64
-            runner: ubuntu-24.04
-          - target: Linux aarch64
-            runner: ubuntu-24.04-arm
-          - target: Windows x86_64
-            runner: windows-latest
-
-    runs-on: ${{ matrix.runner }}
-
-    steps:
-      - name: Download distributions
-        uses: actions/download-artifact@v8
-        with:
-          name: distributions
-          path: dist
-
-      - name: Set up Python 3.14t
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.14t"
-
-      - name: Install built wheel without dependencies
-        shell: bash
+      - name: Install and smoke-test rebuilt Windows wheel
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mapfile -t wheels < <(
-            find dist -maxdepth 1 -type f -name '*.whl' -print
+          $ErrorActionPreference = "Stop"
+
+          $Wheels = @(
+              Get-ChildItem `
+                  -LiteralPath rebuilt-wheel `
+                  -Filter *.whl `
+                  -File
           )
 
-          if [ "${#wheels[@]}" -ne 1 ]; then
-            echo "::error::Expected exactly one wheel."
-            exit 1
-          fi
+          if ($Wheels.Count -ne 1) {
+              throw "Expected exactly one rebuilt wheel."
+          }
 
-          python -m pip install \
-            --force-reinstall \
-            --no-deps \
-            "${wheels[0]}"
+          python -m pip install `
+            --force-reinstall `
+            --no-deps `
+            $Wheels[0].FullName
 
-      - name: Smoke-test installed namespace and Plane messages
-        shell: bash
+          if ($LASTEXITCODE -ne 0) {
+              throw "Installation of rebuilt Windows wheel failed."
+          }
+
+      - name: Installed Windows wheel smoke
+        shell: python
         run: |
-          python - <<'PY'
           from importlib import metadata, util
           import io
           import sysconfig
 
           if sysconfig.get_config_var("Py_GIL_DISABLED") != 1:
-              raise SystemExit("Expected CPython free-threaded build")
+              raise SystemExit("Expected CPython 3.14 free-threaded build")
 
-          # This is an intentional compatibility-negative check. It is why
-          # the source namespace scanner above excludes the workflow file itself.
           if util.find_spec("pymavlink") is not None:
-              raise SystemExit(
-                  "Old pymavlink import namespace unexpectedly exists"
-              )
+              raise SystemExit("Old pymavlink namespace unexpectedly exists")
 
           import plane_pymavlink
-          from plane_pymavlink.generator.mavcrc import x25crc
+          from plane_pymavlink import dfindexer
           from plane_pymavlink.dialects.v20 import common
 
-          if plane_pymavlink.__version__ != metadata.version(
-              "plane_pymavlink"
-          ):
-              raise SystemExit("Package/distribution version mismatch")
+          if metadata.version("plane_pymavlink") != "2.4.52":
+              raise SystemExit("Installed distribution version mismatch")
+          if plane_pymavlink.__version__ != "2.4.52":
+              raise SystemExit("Imported package version mismatch")
 
-          # Ensure the generator package really imports under StableKite's
-          # namespace rather than only the top-level package doing so.
-          crc = x25crc()
-          crc.accumulate(b"abc")
-          if not isinstance(crc.crc, int):
-              raise SystemExit("x25crc smoke test failed")
-
-          bbox_cls = common.MAVLink_plane_target_bbox_message
-          target_cls = common.MAVLink_plane_target_id_message
-          no_target_cls = common.MAVLink_plane_no_target_message
-
-          assert bbox_cls.id == 3
-          assert target_cls.id == 9
-          assert no_target_cls.id == 10
-
-          assert list(bbox_cls.fieldnames) == [
-              "time_boot_ms",
-              "shoot_time_ms",
-              "time",
-              "score",
-              "left",
-              "top",
-              "right",
-              "bottom",
-              "target_id",
-              "track_id",
-          ]
-          assert list(target_cls.fieldnames) == [
-              "time_boot_ms",
-              "target_id",
-          ]
-          assert list(no_target_cls.fieldnames) == [
-              "time_boot_ms",
-              "shoot_time_ms",
-          ]
+          if dfindexer.available:
+              raise SystemExit(
+                  "Windows universal wheel unexpectedly loaded native dfindexer"
+              )
 
           mav = common.MAVLink(io.BytesIO())
-
-          bbox = bbox_cls(
-              time_boot_ms=1,
-              shoot_time_ms=2,
-              time=3,
-              score=0.9,
-              left=0.1,
-              top=0.2,
-              right=0.8,
-              bottom=0.9,
-              target_id=7,
-              track_id=7,
-          )
-          target = target_cls(
+          msg = common.MAVLink_plane_target_id_message(
               time_boot_ms=1,
               target_id=-1,
           )
-          no_target = no_target_cls(
-              time_boot_ms=1,
-              shoot_time_ms=2,
+          if msg.pack(mav)[1] != 5:
+              raise SystemExit("Plane MAVLink smoke failed")
+
+          print("Windows installed-wheel smoke: OK")
+          print("dfindexer native extension intentionally absent on Windows")
+
+      - name: Upload Windows wheel and sdist
+        uses: actions/upload-artifact@v7
+        with:
+          name: plane-dist-windows
+          path: |
+            dist/plane_pymavlink-2.4.52-py3-none-any.whl
+            dist/plane_pymavlink-2.4.52.tar.gz
+          if-no-files-found: error
+
+  linux-native:
+    name: ${{ matrix.target }}
+    needs: windows-package
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Linux glibc x86_64 / CPython 3.14t
+            runner: ubuntu-24.04
+            identifier: cp314t-manylinux_x86_64
+            artifact: plane-dist-linux-glibc-x86_64
+            platform: manylinux
+            arch: x86_64
+          - target: Linux glibc aarch64 / CPython 3.14t
+            runner: ubuntu-24.04-arm
+            identifier: cp314t-manylinux_aarch64
+            artifact: plane-dist-linux-glibc-aarch64
+            platform: manylinux
+            arch: aarch64
+          - target: Linux musl x86_64 / CPython 3.14t
+            runner: ubuntu-24.04
+            identifier: cp314t-musllinux_x86_64
+            artifact: plane-dist-linux-musl-x86_64
+            platform: musllinux
+            arch: x86_64
+          - target: Linux musl aarch64 / CPython 3.14t
+            runner: ubuntu-24.04-arm
+            identifier: cp314t-musllinux_aarch64
+            artifact: plane-dist-linux-musl-aarch64
+            platform: musllinux
+            arch: aarch64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Download Windows-built source distribution
+        uses: actions/download-artifact@v8
+        with:
+          name: plane-dist-windows
+          path: source-dist
+
+      - name: Set up host Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Install cibuildwheel
+        run: python -m pip install --upgrade "cibuildwheel==4.2.1"
+
+      - name: Locate source distribution
+        id: source
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -t sdists < <(
+            find source-dist \
+              -maxdepth 1 \
+              -type f \
+              -name 'plane_pymavlink-2.4.52.tar.gz' \
+              -print
           )
 
-          assert bbox_cls.unpacker.size == 34
-          assert target_cls.unpacker.size == 5
-          assert no_target_cls.unpacker.size == 8
+          if [ "${#sdists[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one source distribution."
+            printf '%s\n' "${sdists[@]}"
+            exit 1
+          fi
 
-          assert bbox.pack(mav)[1] == 34
-          assert target.pack(mav)[1] == 5
+          printf 'sdist=%s\n' "${sdists[0]}" >> "$GITHUB_OUTPUT"
 
-          # MAVLink 2 trims trailing zero bytes. shoot_time_ms=2 therefore
-          # produces mlen=5, while a value with a non-zero high byte exercises
-          # the full declared 8-byte PLANE_NO_TARGET payload.
-          assert no_target.pack(mav)[1] == 5
-          no_target_full = no_target_cls(
-              time_boot_ms=1,
-              shoot_time_ms=0x01000000,
-          )
-          assert no_target_full.pack(mav)[1] == 8
-          assert target.target_id == -1
+      - name: Build and test native Linux wheel
+        shell: bash
+        env:
+          PYMAVLINK_FAST_INDEX: "1"
+          CIBW_ENVIRONMENT: PYMAVLINK_FAST_INDEX=1
+          CIBW_TEST_COMMAND: >-
+            python -c "import sysconfig;
+            assert sysconfig.get_config_var('Py_GIL_DISABLED') == 1;
+            import plane_pymavlink;
+            from importlib import metadata, util;
+            assert metadata.version('plane_pymavlink') == '2.4.52';
+            assert plane_pymavlink.__version__ == '2.4.52';
+            assert util.find_spec('pymavlink') is None;
+            from plane_pymavlink import dfindexer;
+            assert dfindexer.available;
+            import plane_pymavlink.dfindexer.dfindexer_cy as ext;
+            print('Native installed-wheel smoke: OK', ext.__file__)"
+        run: |
+          set -euo pipefail
 
-          print("Distribution:", metadata.version("plane_pymavlink"))
-          print("Import namespace:", plane_pymavlink.__name__)
-          print("Common dialect:", common.__file__)
-          print("Plane messages smoke-test OK")
-          PY
+          rm -rf wheelhouse
+          mkdir -p wheelhouse
+
+          python -m cibuildwheel \
+            --only "${{ matrix.identifier }}" \
+            --output-dir wheelhouse \
+            "${{ steps.source.outputs.sdist }}"
+
+      - name: Verify native wheel
+        shell: python
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          from email.parser import BytesParser
+          from email.policy import default
+          from pathlib import Path
+          import os
+          import zipfile
+
+          wheels = list(Path("wheelhouse").glob("*.whl"))
+          if len(wheels) != 1:
+              raise SystemExit(f"Expected one native wheel, got {wheels}")
+
+          wheel = wheels[0]
+          name = wheel.name
+          platform = os.environ["EXPECTED_PLATFORM"]
+          arch = os.environ["EXPECTED_ARCH"]
+
+          if not name.startswith("plane_pymavlink-2.4.52-cp314t-"):
+              raise SystemExit(f"Unexpected CPython/free-threaded tag: {name}")
+          if platform not in name:
+              raise SystemExit(
+                  f"Expected platform tag containing {platform!r}: {name}"
+              )
+          if arch not in name:
+              raise SystemExit(
+                  f"Expected architecture tag containing {arch!r}: {name}"
+              )
+
+          with zipfile.ZipFile(wheel) as archive:
+              bad = archive.testzip()
+              if bad is not None:
+                  raise SystemExit(f"Corrupt wheel member: {bad}")
+
+              names = set(archive.namelist())
+              native = [
+                  member for member in names
+                  if member.startswith(
+                      "plane_pymavlink/dfindexer/dfindexer_cy"
+                  )
+                  and member.endswith(".so")
+              ]
+              if len(native) != 1:
+                  raise SystemExit(
+                      f"Expected one native dfindexer extension, got {native}"
+                  )
+
+              metadata_name = next(
+                  member for member in names
+                  if member.endswith(".dist-info/METADATA")
+              )
+              metadata = BytesParser(policy=default).parsebytes(
+                  archive.read(metadata_name)
+              )
+
+          if metadata["Version"] != "2.4.52":
+              raise SystemExit(
+                  f"Native wheel metadata version mismatch: {metadata['Version']}"
+              )
+
+          print("Native wheel:", name)
+          print("Native dfindexer:", native[0])
+
+      - name: Upload native Linux wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
 
   publish:
-    name: Publish to devpi
+    name: Publish platform artifacts to devpi
     needs:
-      - build
-      - test
+      - windows-package
+      - linux-native
 
     if: >-
       github.ref == 'refs/heads/main' &&
@@ -693,10 +777,34 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - name: Download distributions
+      - name: Download Windows artifacts
         uses: actions/download-artifact@v8
         with:
-          name: distributions
+          name: plane-dist-windows
+          path: dist
+
+      - name: Download glibc x86_64 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: plane-dist-linux-glibc-x86_64
+          path: dist
+
+      - name: Download glibc aarch64 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: plane-dist-linux-glibc-aarch64
+          path: dist
+
+      - name: Download musl x86_64 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: plane-dist-linux-musl-x86_64
+          path: dist
+
+      - name: Download musl aarch64 wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: plane-dist-linux-musl-aarch64
           path: dist
 
       - name: Set up Python
@@ -704,50 +812,90 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Verify downloaded artifacts
-        shell: bash
+      - name: Verify complete platform artifact set
+        shell: python
         run: |
-          python - <<'PY'
           from pathlib import Path
           import tarfile
           import zipfile
 
-          wheels = list(Path("dist").glob("*.whl"))
-          sdists = list(Path("dist").glob("*.tar.gz"))
+          dist = Path("dist")
+          wheels = sorted(dist.glob("*.whl"))
+          sdists = sorted(dist.glob("*.tar.gz"))
 
-          if len(wheels) != 1:
+          if len(wheels) != 5:
               raise SystemExit(
-                  f"Expected exactly one wheel, got {wheels}"
+                  "Expected five wheels "
+                  "(Windows universal + four native Linux), "
+                  f"got {[path.name for path in wheels]}"
               )
           if len(sdists) != 1:
               raise SystemExit(
-                  f"Expected exactly one sdist, got {sdists}"
+                  f"Expected one sdist, got {[path.name for path in sdists]}"
               )
 
-          wheel = wheels[0]
-          sdist = sdists[0]
+          expected_universal = "plane_pymavlink-2.4.52-py3-none-any.whl"
+          if not any(path.name == expected_universal for path in wheels):
+              raise SystemExit(f"Missing {expected_universal}")
 
-          if not wheel.name.startswith("plane_pymavlink-"):
-              raise SystemExit(f"Unexpected wheel: {wheel.name}")
+          native = [
+              path.name
+              for path in wheels
+              if path.name != expected_universal
+          ]
 
-          with zipfile.ZipFile(wheel) as archive:
-              bad = archive.testzip()
-              if bad is not None:
-                  raise SystemExit(f"Corrupt wheel member: {bad}")
+          required_tokens = (
+              ("cp314t", "manylinux", "x86_64"),
+              ("cp314t", "manylinux", "aarch64"),
+              ("cp314t", "musllinux", "x86_64"),
+              ("cp314t", "musllinux", "aarch64"),
+          )
 
-          with tarfile.open(sdist, "r:gz") as archive:
+          for tokens in required_tokens:
+              matches = [
+                  name
+                  for name in native
+                  if all(token in name for token in tokens)
+              ]
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"Expected one wheel matching {tokens}, got {matches}"
+                  )
+
+          if sdists[0].name != "plane_pymavlink-2.4.52.tar.gz":
+              raise SystemExit(f"Unexpected sdist: {sdists[0].name}")
+
+          for wheel in wheels:
+              with zipfile.ZipFile(wheel) as archive:
+                  bad = archive.testzip()
+                  if bad is not None:
+                      raise SystemExit(
+                          f"Corrupt member {bad} in {wheel.name}"
+                      )
+
+          with tarfile.open(sdists[0], "r:gz") as archive:
               archive.getmembers()
 
-          print("Ready to publish:")
-          print(" ", wheel.name)
-          print(" ", sdist.name)
-          PY
+          print("Complete devpi artifact set:")
+          for path in [*wheels, *sdists]:
+              print(" ", path.name)
 
-      - name: Install devpi tools
+      - name: Install verification and devpi tools
         run: >-
-          python -m pip install
+          python -m pip install --upgrade
+          twine
           devpi-client
           devpi-tokens
+
+      - name: Twine-check complete distribution set
+        run: python -m twine check dist/*
+
+      - name: Upload combined CI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: plane-pymavlink-2.4.52-dist
+          path: dist/*
+          if-no-files-found: error
 
       - name: Publish
         env:
