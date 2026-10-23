@@ -8466,5 +8466,12 @@
       <field type="int16_t" name="temperature" units="cdegC">Temperature</field>
       <field type="uint16_t" name="humidity" units="c%">Humidity</field>
     </message>
+    <message id="61000" name="PLANE_DETECTION_COMPACT">
+      <description>Compact camera track observation (MAVLink 2). Four uint8 fields in the declared order. A normal record uses record_index 1..255 cyclically and a persistent track_id 1..255. record_index=0 with a nonzero track_id immediately cancels that track. track_id=0 clears all camera tracks regardless of other fields. This is a local StableKite dialect ID, not a globally allocated MAVLink message ID.</description>
+      <field type="uint8_t" name="record_index">Cyclic observation counter 1..255; 0 cancels track_id.</field>
+      <field type="uint8_t" name="track_id">Persistent track ID 1..255; 0 clears all tracks.</field>
+      <field type="uint8_t" name="center_x">Box center x normalized to 0..255, left to right. Ignored for cancellation.</field>
+      <field type="uint8_t" name="center_y">Box center y normalized to 0..255, top to bottom. Ignored for cancellation.</field>
+    </message>
   </messages>
 </mavlink>
